@@ -1,0 +1,10 @@
+ReceivedDateTime
+Sender
+Subject
+ConversationId
+Categories
+Folder
+Importance
+HasAttachments
+ToRecipients
+CcRecipients

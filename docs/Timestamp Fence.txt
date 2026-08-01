@@ -1,0 +1,2 @@
+# This tells BBEdit to insert the current date, time, and formatting fences
+=== #DATETIME %Y-%m-%d, %I:%M %p# ===

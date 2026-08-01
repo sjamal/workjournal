@@ -1,0 +1,12 @@
+{
+  "files.exclude": {
+    "cache": true,
+    "compilation": true,
+    "venv": true
+  },
+  "search.exclude": {
+    "cache": true,
+    "compilation": true,
+    "venv": true
+  }
+}
