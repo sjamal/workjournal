@@ -1,100 +1,116 @@
+#!/usr/bin/env python3
+
+"""Generate non-interactive Markdown and legacy text exports from consolidated workjournal data.
+
+Purpose:
+- Produce compilation/confluence_markup.md without opening the dashboard UI.
+- Use the same timeline sources as compile_dashboard.py for consistent output.
+
+How to run:
+- ./venv/bin/python scripts/generate_journal.py
+- ./venv/bin/python scripts/generate_journal.py --days 31
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
-import glob
-import re
-from datetime import datetime, timedelta
+
+from compile_dashboard import build_confluence_rows, build_timeline
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
-BBEDIT_NOTES_FILE = os.path.expanduser("~/Documents/Personal/notes/2026-notes.txt")
+OUTPUT_MD_FILE = os.path.join(BASE_DIR, "compilation", "confluence_markup.md")
 OUTPUT_TEXT_FILE = os.path.join(BASE_DIR, "compilation", "confluence_markup.txt")
 
-def parse_journal_timeline():
-    if not os.path.exists(BBEDIT_NOTES_FILE):
-        print(f"[X] Notes file not found: {BBEDIT_NOTES_FILE}")
-        return
 
-    print("Processing notes and cross-referencing screenshot windows...")
-    
-    with open(BBEDIT_NOTES_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
+def _escape_markup_cell(value: str) -> str:
+    compact = str(value).replace("\r", " ").replace("\n", " ").strip()
+    return compact.replace("|", "\\|")
 
-    # Split notes cleanly by your automated timestamp fence headings
-    chunks = re.split(r'===\s*(\d{4}-\d{2}-\d{2}),\s*(\d{1,2}:\d{2}\s*[A-Z]{2})\s*===', content, flags=re.IGNORECASE)
-    
-    bbedit_blocks = []
-    if len(chunks) > 1:
-        for i in range(1, len(chunks), 3):
-            date_str = chunks[i].strip()
-            time_str = chunks[i+1].strip()
-            text_block = chunks[i+2].strip()
-            
-            # Use raw string combinations for matching to eliminate floating timezone calculation gaps
-            time_clean = time_str.upper().replace(" ", "")
-            bbedit_blocks.append({
-                "date": date_str,
-                "time_match_key": f"{date_str} {time_clean}",
-                "text": text_block
-            })
 
-    screenshots = []
-    thirty_days_ago = datetime.now().timestamp() - (30 * 86400)
-    ticket_pattern = re.compile(r'(INC\d+|REQ\d+|Task-\d+|US-\d+)', re.IGNORECASE)
+def _section_for_row(row: dict[str, str]) -> str:
+    kind = str(row.get("kind", "")).strip()
+    ref = str(row.get("ref", "")).strip()
+    if kind == "ticket":
+        return "Ticket Summary"
+    if kind == "meeting":
+        return "Meeting Minutes"
+    if kind == "email-analytics":
+        return "Email Analytics Daily Summary"
+    if kind in {"screenshot", "note"}:
+        return "Chronological Activity"
+    if ref.startswith("Screenshot ("):
+        return "Chronological Activity"
+    if ref.startswith("Meeting:"):
+        return "Meeting Minutes"
+    if ref == "Email Analytics Summary":
+        return "Email Analytics Daily Summary"
+    return "Activity"
 
-    for ext in ("*.png", "*.jpg", "*.jpeg"):
-        for fp in glob.glob(os.path.join(DOWNLOADS_DIR, ext)):
-            mtime = os.path.getmtime(fp)
-            if mtime >= thirty_days_ago:
-                dt_obj = datetime.fromtimestamp(mtime)
-                dt_str = dt_obj.strftime("%Y-%m-%d")
-                
-                # Generate matching string keys for 15 minutes before and after the screenshot mtime
-                valid_keys = []
-                for offset in range(-15, 16):
-                    check_time = dt_obj + timedelta(minutes=offset)
-                    valid_keys.append(check_time.strftime("%Y-%m-%d %I:%M%p").upper())
 
-                # Strict checking execution loop
-                matched_text = ""
-                for block in bbedit_blocks:
-                    if block["time_match_key"] in valid_keys:
-                        matched_text = block["text"]
-                        break
-                
-                # Extract ticket IDs directly from your web-scraped emails or note text
-                tickets_found = ticket_pattern.findall(matched_text) if matched_text else []
-                if not tickets_found:
-                    tickets_found = ticket_pattern.findall(os.path.basename(fp))
-                    
-                ticket_reference = ", ".join(set(tickets_found)) if tickets_found else "Screenshot Evidence"
+def generate_markup(days: int = 31, month: str | None = None) -> str:
+    """Build README-style Markdown markup from consolidated timeline rows."""
+    timeline = build_timeline(days, month=month)
+    rows = build_confluence_rows(timeline)
 
-                # If no precision window text match occurred, force the cell to remain blank for your manual entry
-                summary_output = matched_text.strip() if matched_text else ""
+    markup = ["# Work Journal"]
+    current_day = ""
+    current_section = ""
+    for row in rows:
+        date = _escape_markup_cell(row.get("date", ""))
+        ref = _escape_markup_cell(row.get("ref", ""))
+        url = str(row.get("url", "")).strip()
+        if url:
+            ref = f"[{ref}]({url})"
+        summary = _escape_markup_cell(row.get("summary", ""))
+        attachment = _escape_markup_cell(row.get("attachment", ""))
+        if attachment:
+            summary = f"!{attachment}! {summary}".strip()
+        if not summary:
+            continue
 
-                screenshots.append({
-                    "date": dt_str,
-                    "timestamp": mtime,
-                    "reference": ticket_reference,
-                    "summary": summary_output
-                })
+        if date != current_day:
+            current_day = date
+            current_section = ""
+            markup.append(f"\n## {date}")
 
-    # Sort chronology: Oldest First
-    screenshots.sort(key=lambda x: x["timestamp"])
+        section = _section_for_row(row)
+        if section != current_section:
+            current_section = section
+            markup.append(f"### {section}")
 
-    # Build the Confluence Wiki Markup Table
-    markup = ["||Date||Ticket / Reference Tracing||Operational Accomplishment Summary||"]
-    for ss in screenshots:
-        # Clear out single-line break fragments to preserve Confluence table alignment cells
-        clean_summary = ss["summary"].replace("\n", " ").replace("\r", " ").replace("|", " ")
-        if not clean_summary:
-            clean_summary = " " # Leave blank cell for manual completion inside Confluence
-        markup.append(f"|{ss['date']}|* {ss['reference']} *|{clean_summary}|")
+        kind = str(row.get("kind", "")).strip()
+        if kind == "ticket":
+            markup.append(f"- {ref}: {summary}")
+        elif kind in {"screenshot", "note"}:
+            markup.append(f"- {ref}: {summary}")
+        else:
+            markup.append(f"- {summary}")
 
-    os.makedirs(os.path.dirname(OUTPUT_TEXT_FILE), exist_ok=True)
-    with open(OUTPUT_TEXT_FILE, "w", encoding="utf-8") as out_f:
-        out_f.write("\n".join(markup))
-        
-    print(f"\n[✓] Success! Confluence table code compiled at: {OUTPUT_TEXT_FILE}")
-    print("[-] Open this file in BBEdit, copy the text, and paste it inside Confluence via Insert -> Markup.")
+    return "\n".join(markup)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate Markdown export files from local caches")
+    parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
+    parser.add_argument("--month", default="", help="Optional month scope in YYYY-MM (example: 2026-07)")
+    parser.add_argument("--output", default=OUTPUT_MD_FILE, help="Primary output markdown file path")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    output = generate_markup(days=args.days, month=args.month or None)
+    for target in (args.output, OUTPUT_TEXT_FILE):
+        with open(target, "w", encoding="utf-8") as out_f:
+            out_f.write(output)
+
+    row_count = max(0, len(output.splitlines()) - 1)
+    print(f"[✓] Markdown export written: {args.output}")
+    print(f"[✓] Legacy text mirror written: {OUTPUT_TEXT_FILE}")
+    print(f"[✓] Rows generated: {row_count}")
+
 
 if __name__ == "__main__":
-    parse_journal_timeline()
+    main()
