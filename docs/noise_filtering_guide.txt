@@ -1,0 +1,74 @@
+
+HIGH
+
+Items likely tied to your actual deliverables.
+
+Examples:
+
+INC emails
+CHG emails
+Secret rotations
+Pull requests
+Build failures
+Production alerts
+
+MEDIUM
+
+Useful awareness items.
+
+Examples:
+
+CAB digests
+Azure lifecycle notices
+
+LOW
+
+Likely report noise.
+
+Examples:
+
+Newsletters
+Conferences
+Library announcements
+
+My Personal Filtering Rule
+
+I'd actually produce two reports.
+
+Executive Report
+
+Excludes:
+Newsletters
+Conferences
+Broadcast mailing lists
+Vendor marketing
+Routine announcements
+
+Result:
+429 Emails
+243 Operational
+96 DevOps
+41 ServiceNow
+37 Azure Governance
+29 SIS Operations
+22 Security
+
+
+Full Report
+
+Everything included.
+
+Useful if you're trying to reconstruct a month.
+
+The Most Valuable Metric
+
+After doing this kind of analysis many times, the metric I always end up liking is:
+Emails: 429
+Conversations: 81
+Operational Conversations: 53
+Projects: 11
+Incidents: 7
+Changes: 14
+
+That tells the story much better than raw email volume.
+

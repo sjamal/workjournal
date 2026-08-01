@@ -1,0 +1,31 @@
+.DS_Store
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Editors
+.vscode/*
+!.vscode/settings.json
+
+# Generated outputs
+compilation/
+cache/
+
+# Local data that may contain sensitive information
+incidents/*.json
+transcripts/*.txt
+
+# Temporary files
+*.log
+*.tmp
