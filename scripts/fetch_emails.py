@@ -1,3 +1,17 @@
+#!/usr/bin/env python3
+
+"""Optionally extract inbox metadata directly from local Outlook SQLite caches.
+
+Purpose:
+- Build cache/emails_cache.json from local Outlook profile data.
+- This is optional and independent from import_email_analytics_reports.py.
+
+How to run:
+- ./venv/bin/python scripts/fetch_emails.py
+- ./venv/bin/python scripts/fetch_emails.py --days 31
+"""
+
+import argparse
 import os
 import json
 import glob
@@ -10,10 +24,11 @@ CACHE_DIR = os.path.join(BASE_DIR, "cache")
 EMAIL_CACHE_FILE = os.path.join(CACHE_DIR, "emails_cache.json")
 
 OUTLOOK_PROFILE_DIR = os.path.expanduser("~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles")
-CUTOFF_DAYS = 30
-START_DATE = datetime.now() - timedelta(days=CUTOFF_DAYS)
 
-def fetch_new_outlook_emails():
+
+def fetch_new_outlook_emails(days: int = 31):
+    start_date = datetime.now() - timedelta(days=days)
+
     print("\n========================================")
     print("Deep Scanning New Outlook SQLite Message Containers")
     print("========================================")
@@ -80,7 +95,7 @@ def fetch_new_outlook_emails():
                 
                 clean_date = datetime.fromtimestamp(raw_time).strftime("%Y-%m-%d")
                 
-                if clean_date >= START_DATE.strftime("%Y-%m-%d") and subject:
+                if clean_date >= start_date.strftime("%Y-%m-%d") and subject:
                     found_tickets = ticket_pattern.findall(str(subject))
                     ticket_str = ", ".join(set(found_tickets)) if found_tickets else "None"
                     
@@ -106,5 +121,12 @@ def fetch_new_outlook_emails():
     except Exception as e:
         print(f"[X] Internal database query processing failure: {e}")
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Optionally scan local Outlook SQLite caches into emails_cache.json")
+    parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    fetch_new_outlook_emails()
+    args = parse_args()
+    fetch_new_outlook_emails(days=args.days)

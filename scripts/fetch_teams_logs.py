@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+
+"""Extract useful Teams snippets from support-log bundles into local cache.
+
+Purpose:
+- Parse recent MSTeams support-log exports in Downloads and build
+    cache/teams_chats_cache.json with likely conversational lines.
+
+How to run:
+- ./venv/bin/python scripts/fetch_teams_logs.py
+"""
+
 import os
 import json
 import re

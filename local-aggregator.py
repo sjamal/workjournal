@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+
+"""Legacy local dashboard generator from Outlook, notes, and screenshots.
+
+Purpose:
+- Produce a standalone review HTML on Desktop from local artifacts.
+- Kept for reference; prefer scripts/compile_dashboard.py for current workflow.
+
+How to run:
+- ./venv/bin/python local-aggregator.py
+"""
+
 import os
 import re
 import glob
