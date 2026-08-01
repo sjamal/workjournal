@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 
-"""Import daily markdown artifacts from email-analytics into workjournal cache."""
+"""Import daily markdown artifacts from email-analytics into workjournal cache.
+
+Purpose:
+- Read `daily_YYYY-MM-DD.md` files from sibling email-analytics output.
+- Build cache/email_analytics_daily_cache.json for dashboard and export workflows.
+
+How to run:
+- ./venv/bin/python scripts/import_email_analytics_reports.py
+- ./venv/bin/python scripts/import_email_analytics_reports.py --source-dir ../email-analytics/output
+"""
 
 from __future__ import annotations
 
@@ -39,13 +48,29 @@ def _extract_daily_summary(text: str) -> str:
     lines = text.splitlines()
     summary_lines = [x.strip() for x in _extract_section(lines, "## Summary") if x.strip().startswith("-")]
     action_lines = [x.strip() for x in _extract_section(lines, "## Action Required") if x.strip().startswith("-")]
+    project_lines = [x.strip() for x in _extract_section(lines, "## Project Activity") if x.strip().startswith("-")]
+    awareness_lines = [x.strip() for x in _extract_section(lines, "## Awareness") if x.strip().startswith("-")]
 
-    bullets = []
-    bullets.extend(summary_lines[:3])
-    bullets.extend(action_lines[:3])
-    if not bullets:
+    # Keep all useful bullets, but deduplicate recurring alerts while preserving order.
+    deduped_awareness = list(dict.fromkeys(awareness_lines))
+
+    parts: list[str] = []
+    if summary_lines:
+        parts.append("Summary:")
+        parts.extend(summary_lines)
+    if action_lines:
+        parts.append("Action Required:")
+        parts.extend(action_lines)
+    if project_lines:
+        parts.append("Project Activity:")
+        parts.extend(project_lines)
+    if deduped_awareness:
+        parts.append("Awareness:")
+        parts.extend(deduped_awareness)
+
+    if not parts:
         return ""
-    return "\n".join(bullets)
+    return "\n".join(parts)
 
 
 def import_daily_reports(source_dir: Path, pattern: str = "daily_*.md") -> list[dict[str, str]]:

@@ -1,107 +1,180 @@
+#!/usr/bin/env python3
+
+"""Publish consolidated journal content to Confluence Cloud via REST API.
+
+Purpose:
+- Create a Confluence Cloud page from the same consolidated rows used by the
+  dashboard and Markdown export.
+- Upload screenshot assets from compilation/assets as page attachments so
+  image references can render inline.
+
+How to run:
+- ./venv/bin/python scripts/publish_to_confluence.py --month 2026-07
+- ./venv/bin/python scripts/publish_to_confluence.py --month 2026-07 --upload-assets
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
-import json
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
+from html import escape
+from pathlib import Path
+
+import requests
 from dotenv import load_dotenv
 
-import requests # type: ignore
-from requests.auth import HTTPBasicAuth  # type: ignore
+from compile_dashboard import build_confluence_rows, build_timeline
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE_DIR = os.path.join(BASE_DIR, "cache")
-BBEDIT_NOTES_FILE = os.path.expanduser("~/Documents/Personal/notes/2026-notes.txt")
+BASE_DIR = Path(__file__).resolve().parents[1]
+ASSETS_DIR = BASE_DIR / "compilation" / "assets"
 
-CUTOFF_DAYS = 30
-START_DATE_OBJ = datetime.now() - timedelta(days=CUTOFF_DAYS)
-START_DATE_STR = START_DATE_OBJ.strftime("%Y-%m-%d")
 
-def load_cache_file(filename):
-    path = os.path.join(CACHE_DIR, filename)
-    if os.path.exists(path):
-        try:
-            with open(path, 'r', encoding='utf-8') as f: return json.load(f)
-        except: pass
-    return []
+def _escape_attr(value: str) -> str:
+    return escape(str(value), quote=True)
 
-def parse_bbedit_journal_blocks():
-    blocks = {}
-    if not os.path.exists(BBEDIT_NOTES_FILE): return blocks
-    with open(BBEDIT_NOTES_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-    chunks = re.split(r'===\s*(\d{4}-\d{2}-\d{2})(?:,\s*\d{1,2}:\d{2}\s*[A-Z]{2})?\s*===', content, flags=re.IGNORECASE)
-    if len(chunks) > 1:
-        for i in range(1, len(chunks), 2):
-            dt = chunks[i].strip()
-            if dt >= START_DATE_STR:
-                blocks.setdefault(dt, []).append(chunks[i+1].strip())
-    return blocks
 
-def build_confluence_page():
-    tickets = load_cache_file("work_items_cache.json")
-    meetings = load_cache_file("meeting_summaries_cache.json")
-    notes_by_date = parse_bbedit_journal_blocks()
+def _section_for_row(row: dict[str, str]) -> str:
+    kind = str(row.get("kind", "")).strip()
+    ref = str(row.get("ref", "")).strip()
+    if kind == "ticket":
+        return "Ticket Summary"
+    if kind == "meeting":
+        return "Meeting Minutes"
+    if kind == "email-analytics":
+        return "Email Analytics Daily Summary"
+    if kind in {"screenshot", "note"}:
+        return "Chronological Activity"
+    if ref.startswith("Screenshot ("):
+        return "Chronological Activity"
+    if ref.startswith("Meeting:"):
+        return "Meeting Minutes"
+    if ref == "Email Analytics Summary":
+        return "Email Analytics Daily Summary"
+    return "Activity"
 
-    # Create sorted chronological map rows array
-    all_dates = sorted(list(set(list(notes_by_date.keys()) + [t.get("date_modified", "")[:10] for t in tickets if t.get("date_modified")])))
 
-    xhtml = ["<h2>🗓️ Integrated Monthly Operational Log</h2>"]
-    xhtml.append("<p><em>Generated programmatically from offline operational databases and BBEdit scratchpads.</em></p>")
-    xhtml.append("<table data-layout='full-width' border='1'><thead><tr><th>Date</th><th>Reference Tracking</th><th>Task Accomplishment Summary</th></tr></thead><tbody>")
+def _build_storage_html(rows: list[dict[str, str]], title: str) -> str:
+    parts = [f"<h1>{escape(title)}</h1>"]
+    current_day = ""
+    current_section = ""
+    list_open = False
 
-    for day in all_dates:
-        if day < START_DATE_STR: continue
-        
-        # 1. Process System Tickets matching date
-        for t in tickets:
-            if t.get("date_modified", "")[:10] == day:
-                is_ado = "DevOps" in t["source"]
-                color = "#403294" if is_ado else "#006644"
-                lbl = "ADO" if is_ado else "SN"
-                xhtml.append(f"<tr><td><strong>{day}</strong></td><td><span style='color:{color}; font-weight:bold;'>{lbl} {t['id']}</span></td><td>Resolved engineering task details for: {t['title']}</td></tr>")
-        
-        # 2. Process Manual Notes & Scraped Browser Conversations matching date
-        if day in notes_by_date:
-            for note_text in notes_by_date[day]:
-                clean_note = note_text.replace('\n', '<br/>')
-                xhtml.append(f"<tr><td><strong>{day}</strong></td><td><span style='color:#a54800; font-weight:bold;'>Scratchpad Log</span></td><td>{clean_note}</td></tr>")
+    def close_list() -> None:
+        nonlocal list_open
+        if list_open:
+            parts.append("</ul>")
+            list_open = False
 
-    xhtml.append("</tbody></table>")
+    for row in rows:
+        date = escape(str(row.get("date", "")))
+        section = _section_for_row(row)
+        ref_label = str(row.get("ref", "")).strip()
+        url = str(row.get("url", "")).strip()
+        summary = str(row.get("summary", "")).strip()
+        attachment = str(row.get("attachment", "")).strip()
+        kind = str(row.get("kind", "")).strip()
 
-    # Append KT Meetings sections below the main grid
-    if meetings:
-        xhtml.append("<h2>💡 Technical Knowledge Transfer Reference Sheets</h2>")
-        for mt in sorted(meetings, key=lambda x: x.get('date', '')):
-            if mt.get('date', '') >= START_DATE_STR:
-                kb_body = mt['high_fidelity_kb'].replace('\n', '<br/>')
-                xhtml.append(f"<div style='background-color:#fafbfc; border-left:4px solid #0052cc; padding:15px; margin-bottom:20px;'><h3>{mt['inferred_title']} ({mt['date']})</h3><p>{kb_body}</p></div>")
+        if not summary:
+            continue
 
-    return "\n".join(xhtml)
+        if date != current_day:
+            close_list()
+            current_day = date
+            current_section = ""
+            parts.append(f"<h2>{date}</h2>")
 
-def publish_page():
-    url = f"{os.getenv('CONFLUENCE_URL')}/rest/api/content"
-    auth = HTTPBasicAuth(os.getenv("CONFLUENCE_EMAIL"), os.getenv("CONFLUENCE_TOKEN"))
-    page_html = build_confluence_page()
-    
+        if section != current_section:
+            close_list()
+            current_section = section
+            parts.append(f"<h3>{escape(section)}</h3>")
+            parts.append("<ul>")
+            list_open = True
+
+        if kind == "ticket":
+            ref_html = f"<a href='{_escape_attr(url)}'>{escape(ref_label)}</a>" if url else escape(ref_label)
+            bullet = f"{ref_html}: {escape(summary)}"
+        elif kind in {"screenshot", "note"}:
+            label = escape(ref_label or "Activity")
+            body = escape(summary)
+            if attachment:
+                body = f"<ac:image><ri:attachment ri:filename=\"{_escape_attr(attachment)}\" /></ac:image> {body}"
+            bullet = f"{label}: {body}"
+        else:
+            bullet = escape(summary)
+
+        parts.append(f"<li>{bullet}</li>")
+
+    close_list()
+    return "\n".join(parts)
+
+
+def _upload_attachment(base_url: str, page_id: str, email: str, token: str, file_path: Path) -> None:
+    url = f"{base_url}/rest/api/content/{page_id}/child/attachment"
+    headers = {"X-Atlassian-Token": "no-check"}
+    with file_path.open("rb") as fh:
+        files = {"file": (file_path.name, fh, "application/octet-stream")}
+        response = requests.post(url, auth=(email, token), headers=headers, files=files, timeout=120)
+        response.raise_for_status()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Publish monthly workjournal content to Confluence Cloud")
+    parser.add_argument("--month", default=datetime.now().strftime("%Y-%m"), help="Month scope in YYYY-MM (example: 2026-07)")
+    parser.add_argument("--title", default=os.getenv("CONFLUENCE_TITLE", "Work Journal"), help="Confluence page title")
+    parser.add_argument("--space-key", default=os.getenv("CONFLUENCE_SPACE", ""), help="Confluence space key")
+    parser.add_argument("--parent-page-id", default=os.getenv("CONFLUENCE_PARENT_PAGE_ID", ""), help="Optional parent page ID to create the journal under")
+    parser.add_argument("--base-url", default=os.getenv("CONFLUENCE_URL", ""), help="Confluence base URL, for example https://example.atlassian.net/wiki")
+    parser.add_argument("--email", default=os.getenv("CONFLUENCE_EMAIL", ""), help="Confluence account email")
+    parser.add_argument("--api-token", default=os.getenv("CONFLUENCE_API_TOKEN", os.getenv("CONFLUENCE_TOKEN", "")), help="Confluence API token")
+    parser.add_argument("--upload-assets", action="store_true", help="Upload screenshots from compilation/assets as page attachments")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.base_url or not args.email or not args.api_token or not args.space_key:
+        print("[X] Missing Confluence credentials or space key. Set CONFLUENCE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, and CONFLUENCE_SPACE.")
+        return 1
+
+    timeline = build_timeline(31, month=args.month)
+    rows = build_confluence_rows(timeline)
+    storage_html = _build_storage_html(rows, args.title)
+
+    create_url = f"{args.base_url}/rest/api/content"
     payload = {
         "type": "page",
-        "title": os.getenv("CONFLUENCE_TITLE"),
-        "space": {"key": os.getenv("CONFLUENCE_SPACE")},
-        "body": {"storage": {"value": page_html, "representation": "storage"}}
+        "title": args.title,
+        "space": {"key": args.space_key},
+        "body": {"storage": {"value": storage_html, "representation": "storage"}},
     }
-    
-    print("\n[+] Pushing formatted operational journal directly to Confluence API...")
-    response = requests.post(url, json=payload, auth=auth, headers={"Content-Type": "application/json"})
-    # UPDATE LINE 92 TO ACCEPT BOTH CODES:
-    if response.status_code in [200, 201]:
-        print(f"[✓] Success! Transaction Accepted by Confluence (Status: {response.status_code})")
-        try:
-            print(f"[+] Page Link: {os.getenv('CONFLUENCE_URL')}/pages/viewpage.action?pageId={response.json().get('id')}")
-        except:
-            print("[+] Page created. Check your target corporate space timeline to verify background rendering.")
-    else:
-        print(f"[X] Confluence API Block ({response.status_code}): {response.text}")
+    parent_page_id = str(args.parent_page_id).strip()
+    if parent_page_id:
+        payload["ancestors"] = [{"id": parent_page_id}]
+
+    print(f"[+] Creating Confluence page in space {args.space_key}...")
+    response = requests.post(create_url, auth=(args.email, args.api_token), json=payload, timeout=120)
+    response.raise_for_status()
+    page_id = response.json().get("id")
+    page_url = f"{args.base_url}/pages/viewpage.action?pageId={page_id}"
+    print(f"[✓] Page created: {page_url}")
+    if parent_page_id:
+        print(f"[✓] Created under parent page id: {parent_page_id}")
+
+    if args.upload_assets:
+        if ASSETS_DIR.exists():
+            files = sorted(p for p in ASSETS_DIR.iterdir() if p.is_file())
+            for file_path in files:
+                print(f"[+] Uploading attachment: {file_path.name}")
+                _upload_attachment(args.base_url, page_id, args.email, args.api_token, file_path)
+            print(f"[✓] Uploaded {len(files)} attachments from {ASSETS_DIR}")
+        else:
+            print(f"[-] Assets directory not found: {ASSETS_DIR}")
+
+    return 0
+
 
 if __name__ == "__main__":
-    publish_page()
+    raise SystemExit(main())

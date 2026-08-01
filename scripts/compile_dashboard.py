@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 
-"""Compile an interactive dashboard for monthly work journal assembly."""
+"""Build an interactive monthly dashboard and Confluence table markup.
+
+Purpose:
+- Consolidate local notes, screenshots, ticket cache, meeting summaries, and
+  imported email-analytics daily summaries into a single day-by-day dashboard.
+- Let you review timeline rows visually and generate a downloadable Confluence
+  wiki-table text file from the same rows.
+
+How to run:
+- ./venv/bin/python scripts/compile_dashboard.py
+- ./venv/bin/python scripts/compile_dashboard.py --month 2026-07
+"""
 
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import os
 import re
+import shutil
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -20,12 +34,24 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "compilation")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 OUTPUT_DASHBOARD = os.path.join(OUTPUT_DIR, "work_journal_dashboard.html")
 
-CUTOFF_DAYS = 30
-START_DATE_OBJ = datetime.now() - timedelta(days=CUTOFF_DAYS)
-START_DATE_STR = START_DATE_OBJ.strftime("%Y-%m-%d")
+# Keep July 1 clean: only imported email analytics is treated as canonical.
+DAY_CONTENT_SUPPRESSIONS = {
+    "2026-07-01": {"note_logs", "screenshots", "tickets", "emails", "meetings", "note_blob"}
+}
+
+
+def _month_window(month: str) -> tuple[datetime, datetime]:
+    """Return [month_start, next_month_start) for YYYY-MM input."""
+    start = datetime.strptime(f"{month}-01", "%Y-%m-%d")
+    if start.month == 12:
+        end = datetime(start.year + 1, 1, 1)
+    else:
+        end = datetime(start.year, start.month + 1, 1)
+    return start, end
 
 
 def load_cache_file(filename: str):
+    """Read a JSON cache file from cache/; return [] when missing or invalid."""
     path = os.path.join(CACHE_DIR, filename)
     if os.path.exists(path):
         try:
@@ -56,7 +82,22 @@ def _parse_time_for_day(day: str, raw_time: str) -> datetime | None:
         return None
 
 
-def parse_bbedit_time_contexts():
+def _to_file_uri(path: str) -> str:
+    """Convert a local absolute path to a browser-safe file URI."""
+    try:
+        return Path(path).expanduser().resolve().as_uri()
+    except Exception:
+        return f"file://{path}"
+
+
+def _extract_note_body(line: str) -> str:
+    """Strip leading time tokens so timeline lines stay compact."""
+    compact = re.sub(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?\s*", "", line.strip(), flags=re.IGNORECASE)
+    return compact.strip("-: ") or line.strip()
+
+
+def parse_bbedit_time_contexts(start_date_str: str):
+    """Extract timestamped lines from BBEdit daily note files."""
     time_logs = []
     if not os.path.exists(BBEDIT_DIR):
         return time_logs
@@ -67,14 +108,14 @@ def parse_bbedit_time_contexts():
     for fp in files:
         try:
             with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                curr_dt = START_DATE_STR
+                curr_dt = start_date_str
                 for line in f:
                     day_m = re.search(r"===\s*(\d{4}-\d{2}-\d{2})\s*===", line)
                     if day_m:
                         curr_dt = day_m.group(1).strip()
                         continue
                     t_m = time_pattern.findall(line)
-                    if t_m and curr_dt >= START_DATE_STR:
+                    if t_m and curr_dt >= start_date_str:
                         raw_time = str(t_m[0]).strip()
                         parsed_dt = _parse_time_for_day(curr_dt, raw_time)
                         time_logs.append(
@@ -90,12 +131,39 @@ def parse_bbedit_time_contexts():
     return time_logs
 
 
-def gather_screenshots(bbedit_logs, screenshot_summary_map):
+def _materialize_dashboard_asset(src_path: str, mtime: int, assets_dir: str) -> str:
+    """Copy screenshot into compilation/assets and return relative HTML src path."""
+    src = Path(src_path)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", src.stem)
+    out_name = f"{safe_name}_{mtime}{src.suffix.lower()}"
+    dest = Path(assets_dir) / out_name
+
+    try:
+        if not dest.exists() or os.path.getmtime(src_path) > os.path.getmtime(dest):
+            shutil.copy2(src_path, dest)
+    except Exception:
+        # Fallback to direct file URI when copy fails.
+        return _to_file_uri(src_path)
+
+    rel = os.path.relpath(dest, OUTPUT_DIR)
+    return rel.replace(os.sep, "/")
+
+
+def _asset_name_from_dashboard_src(src: str) -> str:
+    if not src:
+        return ""
+    if src.startswith("file://"):
+        return os.path.basename(src)
+    return os.path.basename(src.replace("\\", "/"))
+
+
+def gather_screenshots(bbedit_logs, screenshot_summary_map, start_date_obj, assets_dir: str):
+    """Collect recent screenshots and infer context from nearby note timestamps."""
     images = []
     for ext in ("*.png", "*.jpg", "*.jpeg"):
         for fp in glob.glob(os.path.join(DOWNLOADS_DIR, ext)):
             mtime = os.path.getmtime(fp)
-            if mtime < START_DATE_OBJ.timestamp():
+            if mtime < start_date_obj.timestamp():
                 continue
 
             dt_obj = datetime.fromtimestamp(mtime)
@@ -109,30 +177,34 @@ def gather_screenshots(bbedit_logs, screenshot_summary_map):
                 parsed_dt = log.get("parsed_dt")
                 if parsed_dt is None:
                     continue
-                # Expanded matching window to improve auto-capture rate.
                 if abs((dt_obj - parsed_dt).total_seconds()) <= 1800:
-                    matched_snippet = log["text"]
+                    matched_snippet = _extract_note_body(log["text"])
                     break
 
             summary_key = f"{fp}|{int(mtime)}"
             ai_summary = screenshot_summary_map.get(summary_key, "")
+            dashboard_src = _materialize_dashboard_asset(fp, int(mtime), assets_dir)
 
             images.append(
                 {
                     "type": "screenshot",
                     "path": fp,
+                    "path_uri": _to_file_uri(fp),
                     "name": os.path.basename(fp),
                     "date": dt_str,
                     "timestamp": dt_obj,
                     "tickets": ", ".join(set(tks)) if tks else "Screenshot Evidence",
                     "inferred_context": matched_snippet,
                     "ai_summary": ai_summary,
+                    "dashboard_src": dashboard_src,
+                    "asset_name": _asset_name_from_dashboard_src(dashboard_src),
                 }
             )
     return images
 
 
-def parse_bbedit_notes_for_sidebar():
+def parse_bbedit_notes_for_sidebar(start_date_str: str):
+    """Return full per-day note blocks for optional reference usage."""
     notes = {}
     if not os.path.exists(BBEDIT_DIR):
         return notes
@@ -144,7 +216,7 @@ def parse_bbedit_notes_for_sidebar():
                 if len(chunks) > 1:
                     for i in range(1, len(chunks), 2):
                         dt = chunks[i].strip()
-                        if dt >= START_DATE_STR:
+                        if dt >= start_date_str:
                             notes[dt] = chunks[i + 1].strip()
         except Exception:
             pass
@@ -152,12 +224,15 @@ def parse_bbedit_notes_for_sidebar():
 
 
 def build_day_events(day, day_data):
+    """Build chronological note/screenshot event rows for one day."""
     events = []
 
-    # Chronological note events from timestamp fences.
     for log in day_data.get("note_logs", []):
         parsed_dt = log.get("parsed_dt")
         if parsed_dt is None:
+            continue
+        summary = _extract_note_body(log.get("text", "").strip())
+        if not summary:
             continue
         events.append(
             {
@@ -165,17 +240,16 @@ def build_day_events(day, day_data):
                 "date": day,
                 "time": parsed_dt.strftime("%H:%M"),
                 "ref": "Note",
-                "summary": log.get("text", "").strip(),
+                "summary": summary,
                 "kind": "note",
             }
         )
 
-    # Chronological screenshot events.
     for ss in day_data.get("screenshots", []):
         ts = ss.get("timestamp")
         summary = ss.get("inferred_context", "").strip() or ss.get("ai_summary", "").strip()
         if not summary:
-            summary = "Screenshot captured. Add manual summary if needed."
+            summary = "Screenshot captured. Add summary if needed."
         events.append(
             {
                 "sort_ts": ts,
@@ -196,8 +270,35 @@ def _line(html: list[str], value: str) -> None:
     html.append(value)
 
 
-def generate_dashboard():
-    print("Compiling Complete 30-Day Unified Workspace...")
+def _escape_attr(value: str) -> str:
+    return escape(value, quote=True)
+
+
+def _apply_day_suppressions(day: str, day_data: dict) -> None:
+    suppressed = DAY_CONTENT_SUPPRESSIONS.get(day)
+    if not suppressed:
+        return
+    for key in suppressed:
+        if key not in day_data:
+            continue
+        if isinstance(day_data[key], list):
+            day_data[key] = []
+        elif isinstance(day_data[key], str):
+            day_data[key] = ""
+
+
+def build_timeline(days: int, month: str | None = None):
+    """Build the full day-indexed timeline structure from all local inputs."""
+    if month:
+        start_date_obj, end_date_obj = _month_window(month)
+    else:
+        start_date_obj = datetime.now() - timedelta(days=days)
+        end_date_obj = datetime.now() + timedelta(days=1)
+
+    start_date_str = start_date_obj.strftime("%Y-%m-%d")
+
+    assets_dir = os.path.join(OUTPUT_DIR, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
 
     tickets = load_cache_file("work_items_cache.json")
     meetings = load_cache_file("meeting_summaries_cache.json")
@@ -211,13 +312,15 @@ def generate_dashboard():
         if item.get("path")
     }
 
-    bbedit_logs = parse_bbedit_time_contexts()
-    notes_by_date = parse_bbedit_notes_for_sidebar()
-    screenshots = gather_screenshots(bbedit_logs, screenshot_summary_map)
+    bbedit_logs = parse_bbedit_time_contexts(start_date_str)
+    notes_by_date = parse_bbedit_notes_for_sidebar(start_date_str)
+    screenshots = gather_screenshots(bbedit_logs, screenshot_summary_map, start_date_obj, assets_dir)
 
     timeline = {}
-    for d in range(CUTOFF_DAYS + 1):
-        day_str = (START_DATE_OBJ + timedelta(days=d)).strftime("%Y-%m-%d")
+    total_days = max(1, (end_date_obj - start_date_obj).days) if month else days + 1
+
+    for d in range(total_days):
+        day_str = (start_date_obj + timedelta(days=d)).strftime("%Y-%m-%d")
         timeline[day_str] = {
             "screenshots": [],
             "tickets": [],
@@ -262,26 +365,95 @@ def generate_dashboard():
         if day in timeline:
             timeline[day]["email_analytics"].append(item)
 
+    for day in timeline:
+        _apply_day_suppressions(day, timeline[day])
+
+    return timeline
+
+
+def build_confluence_rows(timeline: dict[str, dict]) -> list[dict[str, str]]:
+    """Create unified rows used by both dashboard export and text file export."""
+    rows: list[dict[str, str]] = []
+
+    for day in sorted(timeline.keys()):
+        day_data = timeline[day]
+        events = build_day_events(day, day_data)
+
+        for t in day_data.get("tickets", []):
+            source = str(t.get("source", ""))
+            prefix = "ADO" if "DevOps" in source else "SN"
+            ref = f"{prefix} {t.get('id', 'UNKNOWN')}"
+            summary = str(t.get("title", "")).strip()
+            if summary:
+                rows.append({"date": day, "ref": ref, "summary": summary, "attachment": "", "url": str(t.get("url", "")).strip(), "kind": "ticket"})
+
+        for ev in events:
+            time_prefix = f"{ev.get('time', '')}: " if ev.get("time") else ""
+            attachment = ""
+            if ev.get("kind") == "screenshot":
+                ref = f"Screenshot ({ev.get('ref', 'Evidence')})"
+                ss = ev.get("screenshot") or {}
+                attachment = str(ss.get("asset_name", "")).strip()
+            else:
+                ref = "Note"
+            rows.append(
+                {
+                    "date": day,
+                    "ref": ref,
+                    "summary": f"{time_prefix}{ev.get('summary', '').strip()}".strip(),
+                    "attachment": attachment,
+                    "url": "",
+                    "kind": str(ev.get("kind", "note")),
+                }
+            )
+
+        for mt in day_data.get("meetings", []):
+            title = str(mt.get("inferred_title", "Meeting")).strip()
+            kb = str(mt.get("high_fidelity_kb", "")).strip()
+            if kb:
+                rows.append({"date": day, "ref": f"Meeting: {title}", "summary": kb, "attachment": "", "url": "", "kind": "meeting"})
+
+        for item in day_data.get("email_analytics", []):
+            summary = str(item.get("daily_summary", "")).strip()
+            if summary:
+                rows.append({"date": day, "ref": "Email Analytics Summary", "summary": summary, "attachment": "", "url": "", "kind": "email-analytics"})
+
+    return rows
+
+
+def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, month: str | None = None):
+    """Compile interactive dashboard HTML with downloadable Confluence export action."""
+    scope_label = month if month else f"last {days} days"
+    print(f"Compiling unified workspace for {scope_label}...")
+    timeline = build_timeline(days, month=month)
+
     html: list[str] = []
     _line(html, "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Journal</title><style>")
     _line(html, "body { font-family:sans-serif; background:#f4f5f7; color:#172b4d; padding:20px; }")
-    _line(html, ".navbar { background:#0052cc; color:white; padding:15px; display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-radius:4px; }")
-    _line(html, ".day-block { background:white; border:1px solid #b3bac5; border-radius:8px; padding:20px; margin-bottom:20px; }")
-    _line(html, ".day-header { font-size:16px; font-weight:bold; color:#0052cc; border-bottom:2px solid #dfe1e6; padding-bottom:4px; margin-bottom:15px; }")
-    _line(html, ".entry { border:1px solid #eee; border-radius:6px; padding:10px; margin-bottom:10px; background:#fafbfc; }")
-    _line(html, ".entry-note { border-left:4px solid #0052cc; }")
-    _line(html, ".entry-shot { border-left:4px solid #a54800; }")
-    _line(html, ".ticket-badge { background:#eae6ff; color:#403294; padding:2px 4px; border-radius:3px; font-size:11px; font-weight:bold; }")
+    _line(html, ".navbar { background:#0052cc; color:white; padding:15px; display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-radius:4px; gap:12px; flex-wrap:wrap; }")
+    _line(html, ".controls { display:flex; gap:8px; align-items:center; }")
+    _line(html, ".day-block { background:white; border:1px solid #dfe1e6; border-radius:8px; padding:16px; margin-bottom:16px; }")
+    _line(html, ".day-header { font-size:16px; font-weight:bold; color:#0052cc; border-bottom:1px solid #dfe1e6; padding-bottom:6px; margin-bottom:12px; }")
+    _line(html, ".section-title { font-weight:bold; font-size:12px; margin:12px 0 6px 0; color:#1f3f72; }")
+    _line(html, ".activity-line { margin:6px 0; line-height:1.35; }")
+    _line(html, ".ts { color:#5e6c84; font-weight:bold; margin-right:4px; }")
+    _line(html, ".ticket-badge { background:#eae6ff; color:#403294; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:bold; }")
     _line(html, ".ticket-badge.sn { background:#e3fcef; color:#006644; }")
-    _line(html, "textarea { width:100%; box-sizing:border-box; margin-top:5px; padding:6px; }")
-    _line(html, "textarea.s-sum { min-height:80px; }")
-    _line(html, "img { max-width:100%; max-height:220px; display:block; margin:5px 0; border:1px solid #ccc; }")
-    _line(html, "pre { background:#f4f5f7; padding:10px; border-radius:4px; font-size:11px; max-height:220px; overflow-y:auto; white-space:pre-wrap; }")
-    _line(html, "button { background:#0052cc; color:white; border:none; padding:10px 20px; border-radius:4px; font-weight:bold; cursor:pointer; }")
+    _line(html, "textarea { width:100%; box-sizing:border-box; margin-top:6px; padding:6px; }")
+    _line(html, "img { max-width:100%; max-height:260px; display:block; margin:6px 0; border:1px solid #ccc; border-radius:4px; }")
+    _line(html, "pre { background:#f4f5f7; padding:10px; border-radius:4px; font-size:11px; max-height:260px; overflow-y:auto; white-space:pre-wrap; }")
+    _line(html, "button { background:#0052cc; color:white; border:none; padding:10px 16px; border-radius:4px; font-weight:bold; cursor:pointer; }")
+    _line(html, "small.subtle { color:#dfe8ff; }")
+    _line(html, "#genStatus { color:#dfe8ff; font-size:12px; }")
     _line(html, "</style></head><body>")
 
-    _line(html, "<div class='navbar'><h1>Confluence Work Journal Compiler</h1><button type='button' onclick='compileJournal()'>Generate Confluence Output</button></div>")
+    _line(
+        html,
+        "<div class='navbar'><div><h1 style='margin:0;'>Confluence Work Journal Compiler</h1><small class='subtle'>Review rows, then download Markdown handoff output.</small></div><div class='controls'><button type='button' onclick='compileJournal()'>Generate Markdown File</button></div><span id='genStatus'></span></div>",
+    )
     _line(html, "<div class='main-workspace'><form id='journalForm'>")
+
+    total_rows = 0
 
     for day in sorted(timeline.keys()):
         day_data = timeline[day]
@@ -297,114 +469,156 @@ def generate_dashboard():
         ):
             continue
 
-        _line(html, f"<div class='day-block'><div class='day-header'>📅 {escape(day)}</div>")
+        _line(html, f"<div class='day-block'><div class='day-header'>{escape(day)}</div>")
 
-        # ADO/SNOW summary at top per request.
         if day_data["tickets"]:
-            _line(html, "<div style='font-weight:bold; font-size:12px; margin-bottom:8px;'>🎟️ Ticket Summary</div>")
+            _line(html, "<div class='section-title'>Ticket Summary</div>")
             for t in day_data["tickets"]:
                 source = str(t.get("source", ""))
                 is_ado = "DevOps" in source
                 b_style = "ticket-badge" if is_ado else "ticket-badge sn"
                 tid = escape(str(t.get("id", "UNKNOWN")))
                 title = escape(str(t.get("title", "Untitled")))
-                _line(html, f"<div style='padding:4px 0;'><span class='{b_style}'>{'ADO' if is_ado else 'SN'} {tid}</span> {title}</div>")
+                ref = f"{'ADO' if is_ado else 'SN'} {str(t.get('id', 'UNKNOWN'))}"
+                ref_url = str(t.get("url", "")).strip()
+                ref_markup = f"<a href='{escape(ref_url, quote=True)}' target='_blank' rel='noreferrer'>{escape(ref)}</a>" if ref_url else escape(ref)
+                desc = str(t.get("title", "")).strip()
+                _line(html, f"<div class='activity-line'><span class='{b_style}'>{ref_markup}</span> {title}</div>")
+                _line(
+                    html,
+                    (
+                        "<div class='journal-row' data-kind='ticket' data-date='"
+                        f"{_escape_attr(day)}' data-ref='{_escape_attr(ref)}' data-url='{_escape_attr(ref_url)}' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(desc)}'></div>"
+                    ),
+                )
+                total_rows += 1
 
-        # Chronological notes/screenshots interspersed.
-        _line(html, "<div style='font-weight:bold; font-size:12px; margin-top:12px;'>🕒 Chronological Activity</div>")
-        if not events:
-            _line(html, "<div class='entry'>No timestamped notes/screenshots captured for this day.</div>")
-        else:
+        if events:
+            _line(html, "<div class='section-title'>Chronological Activity</div>")
             for ev in events:
                 kind = ev.get("kind", "note")
-                ref = escape(str(ev.get("ref", "")))
-                summary = escape(str(ev.get("summary", "")))
-                ev_time = escape(str(ev.get("time", "")))
-                css = "entry-note" if kind == "note" else "entry-shot"
-
-                _line(html, f"<div class='entry {css}'>")
-                _line(html, f"<div style='font-size:11px; color:#5e6c84;'><strong>{ev_time}</strong> | {escape(kind.title())} | {ref}</div>")
+                ref = str(ev.get("ref", ""))
+                summary = str(ev.get("summary", ""))
+                ev_time = str(ev.get("time", "")).strip()
+                time_markup = f"<span class='ts'>{escape(ev_time)}:</span> " if ev_time else ""
 
                 if kind == "screenshot" and ev.get("screenshot"):
                     ss = ev["screenshot"]
-                    path = escape(str(ss.get("path", "")))
+                    image_src = escape(str(ss.get("dashboard_src", ss.get("path_uri", ""))), quote=True)
                     name = escape(str(ss.get("name", "screenshot")))
-                    _line(html, f"<div style='font-size:11px; color:#666;'>📷 Asset: {name}</div><img src='file://{path}'>")
-                    _line(html, f"<textarea class='s-sum'>{summary}</textarea>")
+                    _line(html, "<div class='activity-line'>")
+                    _line(html, f"{time_markup}{escape(summary)}")
+                    _line(html, f"<img src='{image_src}' alt='{name}' loading='lazy'>")
+                    _line(html, "</div>")
+                    row_ref = f"Screenshot ({ref})"
+                    row_attachment = str(ss.get("asset_name", "")).strip()
                 else:
-                    _line(html, f"<div>{summary}</div>")
+                    _line(html, f"<div class='activity-line'>{time_markup}{escape(summary)}</div>")
+                    row_ref = "Note"
+                    row_attachment = ""
 
-                _line(html, f"<input type='hidden' class='entry-date' value='{escape(day)}'>")
-                _line(html, f"<input type='hidden' class='entry-ref' value='{ref}'>")
-                _line(html, f"<input type='hidden' class='entry-desc' value='{summary}'>")
-                _line(html, "</div>")
+                combined_summary = f"{ev_time + ': ' if ev_time else ''}{summary}".strip()
+                _line(
+                    html,
+                    (
+                        "<div class='journal-row' data-kind='"
+                        f"{_escape_attr(kind)}' data-date='{_escape_attr(day)}' data-ref='{_escape_attr(row_ref)}' data-attachment='{_escape_attr(row_attachment)}'>"
+                        f"<input type='hidden' class='journal-desc' value='{_escape_attr(combined_summary)}'></div>"
+                    ),
+                )
+                total_rows += 1
 
-        # Meeting minutes near bottom of day narrative.
         if day_data["meetings"]:
-            _line(html, "<div style='font-weight:bold; font-size:12px; margin-top:12px;'>💡 Meeting Minutes</div>")
+            _line(html, "<div class='section-title'>Meeting Minutes</div>")
             for mt in day_data["meetings"]:
-                title = escape(str(mt.get("inferred_title", "Meeting")))
-                kb = escape(str(mt.get("high_fidelity_kb", "")))
-                _line(html, f"<div class='entry entry-note'><div style='font-size:11px; color:#5e6c84;'><strong>Meeting</strong> | {title}</div><pre>{kb}</pre></div>")
-                _line(html, f"<input type='hidden' class='entry-date' value='{escape(day)}'>")
-                _line(html, f"<input type='hidden' class='entry-ref' value='Meeting: {title}'>")
-                _line(html, f"<input type='hidden' class='entry-desc' value='{kb}'>")
+                title = str(mt.get("inferred_title", "Meeting"))
+                kb = str(mt.get("high_fidelity_kb", ""))
+                _line(html, f"<div class='activity-line'><strong>{escape(title)}</strong></div>")
+                _line(html, f"<pre>{escape(kb)}</pre>")
+                _line(
+                    html,
+                    (
+                        "<div class='journal-row' data-kind='meeting' data-date='"
+                        f"{_escape_attr(day)}' data-ref='{_escape_attr(f'Meeting: {title}')}' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(kb)}'></div>"
+                    ),
+                )
+                total_rows += 1
 
-        # Email analytics narrative summary at bottom of day.
         if day_data["email_analytics"]:
-            _line(html, "<div style='font-weight:bold; font-size:12px; margin-top:12px;'>📊 Email Analytics Daily Summary</div>")
+            _line(html, "<div class='section-title'>Email Analytics Daily Summary</div>")
             for item in day_data["email_analytics"]:
-                summary = escape(str(item.get("daily_summary", "")).strip() or "No daily summary captured.")
-                _line(html, f"<div class='entry'><pre>{summary}</pre></div>")
-                _line(html, f"<input type='hidden' class='entry-date' value='{escape(day)}'>")
-                _line(html, "<input type='hidden' class='entry-ref' value='Email Analytics Summary'>")
-                _line(html, f"<input type='hidden' class='entry-desc' value='{summary}'>")
-
-        # Raw notes and inbox log reference blocks.
-        if day_data["note_blob"]:
-            _line(html, "<div style='font-weight:bold; font-size:12px; margin-top:12px;'>📝 Full Notes (Reference)</div>")
-            _line(html, f"<pre>{escape(day_data['note_blob'])}</pre>")
-
-        if day_data["emails"]:
-            _line(html, "<div style='font-weight:bold; font-size:12px; margin-top:12px; color:#0747a6;'>✉️ Outlook Inbox Log (Reference)</div>")
-            for mail in day_data["emails"]:
-                sender = escape(str(mail.get("sender", "")))
-                subject = escape(str(mail.get("subject", "")))
-                assoc = escape(str(mail.get("associated_tickets", "None")))
-                _line(html, f"<div class='entry'><strong>From:</strong> {sender} | {subject} <span style='color:#a54800; font-size:11px;'>({assoc})</span></div>")
+                summary = str(item.get("daily_summary", "")).strip() or "No daily summary captured."
+                _line(html, f"<pre>{escape(summary)}</pre>")
+                _line(
+                    html,
+                    (
+                        "<div class='journal-row' data-kind='email-analytics' data-date='"
+                        f"{_escape_attr(day)}' data-ref='Email Analytics Summary' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(summary)}'></div>"
+                    ),
+                )
+                total_rows += 1
 
         _line(html, "</div>")
 
     _line(html, "</form></div>")
-    _line(html, "<div id='outBlock' style='display:none; background:#fff; border:1px solid #dfe1e6; border-radius:8px; padding:16px; margin-top:20px;'>")
-    _line(html, "<h2 style='margin-top:0;'>Confluence Storage Format Output</h2>")
-    _line(html, "<textarea id='rawX' style='width:100%; height:220px; box-sizing:border-box; font-family:monospace;'></textarea>")
-    _line(html, "<div style='margin-top:10px;'><button type='button' onclick='copyXHTML()'>Copy Output</button></div>")
-    _line(html, "</div>")
 
     _line(html, "<script>")
-    _line(html, "function copyXHTML() { const ta = document.getElementById('rawX'); ta.select(); document.execCommand('copy'); alert('Copied output to clipboard.'); }")
+    _line(html, "function _escapePipes(s) { return (s || '').split('\\r').join(' ').split('\\n').join(' ').split('|').join('\\\\|').trim(); }")
+    _line(html, "function _downloadTextFile(filename, content) { const blob = new Blob([content], { type: 'text/plain;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }")
     _line(html, "function compileJournal() {")
-    _line(html, "  const dates = document.querySelectorAll('.entry-date');")
-    _line(html, "  const refs = document.querySelectorAll('.entry-ref');")
-    _line(html, "  const descs = document.querySelectorAll('.entry-desc');")
-    _line(html, "  let out = '<h2>🗓️ Monthly Activity Log & Highlights</h2>'; ")
-    _line(html, "  out += '<table border=\"1\" style=\"border-collapse:collapse; width:100%;\"><thead style=\"background-color:#f4f5f7;\"><tr><th>Date</th><th>Reference</th><th>Summary</th></tr></thead><tbody>'; ")
-    _line(html, "  for (let i = 0; i < dates.length; i++) {")
-    _line(html, "    const d = dates[i].value || ''; const r = refs[i].value || ''; const s = descs[i].value || '';")
-    _line(html, "    if (s.trim() !== '') { out += '<tr><td><strong>' + d + '</strong></td><td>' + r + '</td><td>' + s.replace(/\\n/g, '<br/>') + '</td></tr>'; }")
+    _line(html, "  const rows = document.querySelectorAll('.journal-row');")
+    _line(html, "  let out = '# Work Journal\\n';")
+    _line(html, "  let count = 0;")
+    _line(html, "  let currentDay = '';")
+    _line(html, "  let currentSection = '';")
+    _line(html, "  const sectionForKind = (kind, ref) => {")
+    _line(html, "    if (kind === 'ticket') return 'Ticket Summary';")
+    _line(html, "    if (kind === 'meeting') return 'Meeting Minutes';")
+    _line(html, "    if (kind === 'email-analytics') return 'Email Analytics Daily Summary';")
+    _line(html, "    if (kind === 'screenshot' || kind === 'note') return 'Chronological Activity';")
+    _line(html, "    if ((ref || '').startsWith('Screenshot (')) return 'Chronological Activity';")
+    _line(html, "    if ((ref || '').startsWith('Meeting:')) return 'Meeting Minutes';")
+    _line(html, "    if ((ref || '').startsWith('Email Analytics Summary')) return 'Email Analytics Daily Summary';")
+    _line(html, "    return 'Activity';")
+    _line(html, "  };")
+    _line(html, "  for (const row of rows) {")
+    _line(html, "    const d = row.getAttribute('data-date') || ''; const k = row.getAttribute('data-kind') || ''; const r = row.getAttribute('data-ref') || ''; const u = row.getAttribute('data-url') || ''; const a = row.getAttribute('data-attachment') || '';")
+    _line(html, "    const hidden = row.querySelector('.journal-desc');")
+    _line(html, "    let s = hidden ? hidden.value : '';")
+    _line(html, "    if (a) { s = '!'+a+'! ' + s; }")
+    _line(html, "    s = _escapePipes(s);")
+    _line(html, "    const refCell = u ? '[' + _escapePipes(r) + '](' + u + ')' : _escapePipes(r);")
+    _line(html, "    if (!s) { continue; }")
+    _line(html, "    if (d !== currentDay) { currentDay = d; currentSection = ''; out += '\\n## ' + d + '\\n'; }")
+    _line(html, "    const section = sectionForKind(k, r);")
+    _line(html, "    if (section !== currentSection) { currentSection = section; out += '\\n### ' + section + '\\n'; }")
+    _line(html, "    let bullet = s;")
+    _line(html, "    if (k === 'ticket') { bullet = refCell + ': ' + s; }")
+    _line(html, "    else if (k === 'screenshot' || k === 'note') { bullet = (r || 'Activity') + ': ' + s; }")
+    _line(html, "    else if (k === 'meeting' || k === 'email-analytics') { bullet = s; }")
+    _line(html, "    out += '- ' + bullet + '\\n'; count += 1;")
     _line(html, "  }")
-    _line(html, "  out += '</tbody></table>'; ")
-    _line(html, "  document.getElementById('rawX').value = out;")
-    _line(html, "  document.getElementById('outBlock').style.display = 'block';")
+    _line(html, "  const fileName = 'confluence_markup_' + new Date().toISOString().slice(0, 10) + '.md';")
+    _line(html, "  _downloadTextFile(fileName, out);")
+    _line(html, "  document.getElementById('genStatus').textContent = count + ' rows generated and downloaded.';")
     _line(html, "}")
     _line(html, "</script>")
     _line(html, "</body></html>")
 
-    with open(OUTPUT_DASHBOARD, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write("\n".join(html))
-    print(f"[✓] Dashboard compiled perfectly to repo file: {OUTPUT_DASHBOARD}")
+    print(f"[✓] Dashboard compiled to: {output_file}")
+    print(f"[✓] Estimated export rows available: {total_rows}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Compile dashboard and downloadable Confluence markup")
+    parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
+    parser.add_argument("--month", default="", help="Optional month scope in YYYY-MM (example: 2026-07)")
+    parser.add_argument("--output", default=OUTPUT_DASHBOARD, help="Output dashboard HTML path")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    generate_dashboard()
+    args = parse_args()
+    generate_dashboard(days=args.days, output_file=args.output, month=args.month or None)
