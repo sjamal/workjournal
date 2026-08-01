@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 
-"""Optionally summarize screenshots using local Ollama vision models."""
+"""Optionally summarize screenshots using local Ollama vision models.
+
+Purpose:
+- Generate screenshot summary cache entries for timeline enrichment.
+- Keep this step optional for privacy- and latency-friendly local runs.
+
+How to run:
+- ./venv/bin/python scripts/summarize_screenshots.py --days 31
+- ./venv/bin/python scripts/summarize_screenshots.py --days 31 --force
+"""
 
 from __future__ import annotations
 
@@ -52,9 +61,8 @@ def encode_image(path: str) -> str:
 
 def summarize_image(path: str, day_notes: str) -> str:
     prompt = (
-        "Summarize this work screenshot in 1-2 concise bullet points for an IT work journal. "
-        "Focus on observable operational activity, probable ticket/system context, and outcome. "
-        "If uncertain, say so briefly.\n\n"
+        "Write exactly one short sentence summarizing this work screenshot for an IT work journal. "
+        "Keep it under 20 words if possible, mention only the main observable activity or outcome, and do not use bullet points.\n\n"
         f"Day notes context:\n{day_notes[:1500]}"
     )
 
@@ -76,7 +84,7 @@ def summarize_image(path: str, day_notes: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
     parser.add_argument("--downloads", default=DOWNLOADS_DIR)
     parser.add_argument("--output", default=CACHE_FILE)
     parser.add_argument("--force", action="store_true", help="Recompute summaries even if cache has matching key")

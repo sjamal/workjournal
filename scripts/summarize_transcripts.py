@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+
+"""Summarize transcript files into meeting_summaries_cache.json using Ollama.
+
+Purpose:
+- Read transcript .txt files from the local transcripts/ folder.
+- Generate concise, structured meeting summaries for dashboard and export use.
+
+How to run:
+- ./venv/bin/python scripts/summarize_transcripts.py
+"""
+
 import os
 import json
 import glob
@@ -8,7 +20,7 @@ from datetime import datetime
 
 # --- Configurations ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TRANSCRIPTS_DIR = "transcripts"
+TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 MEETING_CACHE_FILE = os.path.join(CACHE_DIR, "meeting_summaries_cache.json")
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
