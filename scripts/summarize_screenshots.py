@@ -59,6 +59,31 @@ def encode_image(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
+def _normalize_summary(raw: str) -> str:
+    text = str(raw).strip()
+    if not text:
+        return ""
+    if text.startswith("AI summary unavailable:"):
+        return text
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)+", "", text)
+
+    sentence_chunks = [s.strip(" \t-•*") for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    sentence = sentence_chunks[0] if sentence_chunks else text
+
+    sentence = re.sub(r"\s+", " ", sentence).strip(" \t-•*")
+    sentence = sentence.strip('"\'')
+    sentence = re.sub(r"([.!?])[.!?]+$", r"\1", sentence)
+    if len(sentence) > 180:
+        sentence = sentence[:177].rstrip() + "..."
+    if sentence and sentence[-1] not in ".!?":
+        sentence += "."
+    return sentence
+
+
 def summarize_image(path: str, day_notes: str) -> str:
     prompt = (
         "Write exactly one short sentence summarizing this work screenshot for an IT work journal. "
@@ -77,7 +102,7 @@ def summarize_image(path: str, day_notes: str) -> str:
         resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-        return str(data.get("response", "")).strip()
+        return _normalize_summary(str(data.get("response", "")).strip())
     except Exception as exc:
         return f"AI summary unavailable: {exc}"
 

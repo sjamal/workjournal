@@ -96,6 +96,71 @@ def _extract_note_body(line: str) -> str:
     return compact.strip("-: ") or line.strip()
 
 
+def _normalize_multiline(value: str) -> str:
+    """Normalize line endings while preserving intentional line breaks."""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip("\n")
+
+
+def _normalize_hhmm(value: str) -> str:
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not m:
+        return value.strip()
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _parse_note_date_marker(line: str, default_year: int) -> str | None:
+    """Normalize ISO and month-name daily note headings to YYYY-MM-DD."""
+    iso_match = re.fullmatch(r"\s*===\s*(\d{4}-\d{2}-\d{2})\s*===\s*", line)
+    if iso_match:
+        return iso_match.group(1)
+
+    month_match = re.fullmatch(
+        r"\s*(January|February|March|April|May|June|July|August|September|October|November|December|"
+        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?\s*",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if not month_match:
+        return None
+
+    try:
+        month = datetime.strptime(month_match.group(1)[:3].title(), "%b").month
+        day = int(month_match.group(2))
+        return datetime(default_year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _drop_redundant_leading_times(text: str) -> str:
+    """Remove duplicated leading HH:MM labels in command-output style note lines."""
+    out: list[str] = []
+    for line in _normalize_multiline(text).split("\n"):
+        m = re.match(r"^\s*(\d{1,2}:\d{2})\s*:\s+(.*)$", line)
+        if not m:
+            out.append(line)
+            continue
+
+        lead = _normalize_hhmm(m.group(1))
+        payload = m.group(2)
+        next_time = re.search(r"\b(\d{1,2}:\d{2})\b", payload)
+        if next_time and _normalize_hhmm(next_time.group(1)) == lead:
+            out.append(payload)
+        else:
+            out.append(line)
+    return "\n".join(out).strip("\n")
+
+
+def _compose_daily_notes(day_data: dict) -> str:
+    """Return daily notes from full BBEdit block, with log-line fallback."""
+    blob = _drop_redundant_leading_times(day_data.get("note_blob", "")).strip()
+    if blob:
+        return blob
+
+    note_lines = [str(item.get("text", "")).strip() for item in day_data.get("note_logs", []) if str(item.get("text", "")).strip()]
+    return _drop_redundant_leading_times("\n".join(note_lines)).strip()
+
+
 def parse_bbedit_time_contexts(start_date_str: str):
     """Extract timestamped lines from BBEdit daily note files."""
     time_logs = []
@@ -108,14 +173,16 @@ def parse_bbedit_time_contexts(start_date_str: str):
     for fp in files:
         try:
             with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                curr_dt = start_date_str
+                file_year_match = re.search(r"(20\d{2})", os.path.basename(fp))
+                default_year = int(file_year_match.group(1)) if file_year_match else int(start_date_str[:4])
+                curr_dt = ""
                 for line in f:
-                    day_m = re.search(r"===\s*(\d{4}-\d{2}-\d{2})\s*===", line)
-                    if day_m:
-                        curr_dt = day_m.group(1).strip()
+                    note_date = _parse_note_date_marker(line, default_year)
+                    if note_date:
+                        curr_dt = note_date
                         continue
                     t_m = time_pattern.findall(line)
-                    if t_m and curr_dt >= start_date_str:
+                    if t_m and curr_dt and curr_dt >= start_date_str:
                         raw_time = str(t_m[0]).strip()
                         parsed_dt = _parse_time_for_day(curr_dt, raw_time)
                         time_logs.append(
@@ -212,12 +279,21 @@ def parse_bbedit_notes_for_sidebar(start_date_str: str):
     for fp in files:
         try:
             with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                chunks = re.split(r"===\s*(\d{4}-\d{2}-\d{2})\s*===", f.read())
-                if len(chunks) > 1:
-                    for i in range(1, len(chunks), 2):
-                        dt = chunks[i].strip()
-                        if dt >= start_date_str:
-                            notes[dt] = chunks[i + 1].strip()
+                file_year_match = re.search(r"(20\d{2})", os.path.basename(fp))
+                default_year = int(file_year_match.group(1)) if file_year_match else int(start_date_str[:4])
+                curr_dt = ""
+                current_lines: list[str] = []
+                for line in f:
+                    note_date = _parse_note_date_marker(line, default_year)
+                    if note_date:
+                        if curr_dt and curr_dt >= start_date_str:
+                            notes[curr_dt] = "".join(current_lines).strip()
+                        curr_dt = note_date
+                        current_lines = []
+                    elif curr_dt:
+                        current_lines.append(line)
+                if curr_dt and curr_dt >= start_date_str:
+                    notes[curr_dt] = "".join(current_lines).strip()
         except Exception:
             pass
     return notes
@@ -226,24 +302,6 @@ def parse_bbedit_notes_for_sidebar(start_date_str: str):
 def build_day_events(day, day_data):
     """Build chronological note/screenshot event rows for one day."""
     events = []
-
-    for log in day_data.get("note_logs", []):
-        parsed_dt = log.get("parsed_dt")
-        if parsed_dt is None:
-            continue
-        summary = _extract_note_body(log.get("text", "").strip())
-        if not summary:
-            continue
-        events.append(
-            {
-                "sort_ts": parsed_dt,
-                "date": day,
-                "time": parsed_dt.strftime("%H:%M"),
-                "ref": "Note",
-                "summary": summary,
-                "kind": "note",
-            }
-        )
 
     for ss in day_data.get("screenshots", []):
         ts = ss.get("timestamp")
@@ -407,16 +465,30 @@ def build_confluence_rows(timeline: dict[str, dict]) -> list[dict[str, str]]:
                 }
             )
 
+        day_notes = _compose_daily_notes(day_data)
+        if day_notes:
+            rows.append({"date": day, "ref": "Daily Notes", "summary": day_notes, "attachment": "", "url": "", "kind": "daily-notes"})
+
         for mt in day_data.get("meetings", []):
             title = str(mt.get("inferred_title", "Meeting")).strip()
             kb = str(mt.get("high_fidelity_kb", "")).strip()
             if kb:
-                rows.append({"date": day, "ref": f"Meeting: {title}", "summary": kb, "attachment": "", "url": "", "kind": "meeting"})
+                rows.append(
+                    {
+                        "date": day,
+                        "ref": f"Meeting: {title}",
+                        "summary": kb,
+                        "attachment": "",
+                        "url": "",
+                        "kind": "meeting",
+                        "file_name": str(mt.get("file_name", "")),
+                    }
+                )
 
         for item in day_data.get("email_analytics", []):
             summary = str(item.get("daily_summary", "")).strip()
             if summary:
-                rows.append({"date": day, "ref": "Email Analytics Summary", "summary": summary, "attachment": "", "url": "", "kind": "email-analytics"})
+                rows.append({"date": day, "ref": "Daily Email Summary", "summary": summary, "attachment": "", "url": "", "kind": "email-analytics"})
 
     return rows
 
@@ -528,6 +600,19 @@ def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, mont
                 )
                 total_rows += 1
 
+        day_notes = _compose_daily_notes(day_data)
+        if day_notes:
+            _line(html, "<div class='section-title'>Daily Notes</div>")
+            _line(html, f"<pre>{escape(day_notes)}</pre>")
+            _line(
+                html,
+                (
+                    "<div class='journal-row' data-kind='daily-notes' data-date='"
+                    f"{_escape_attr(day)}' data-ref='Daily Notes' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(day_notes)}'></div>"
+                ),
+            )
+            total_rows += 1
+
         if day_data["meetings"]:
             _line(html, "<div class='section-title'>Meeting Minutes</div>")
             for mt in day_data["meetings"]:
@@ -545,7 +630,7 @@ def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, mont
                 total_rows += 1
 
         if day_data["email_analytics"]:
-            _line(html, "<div class='section-title'>Email Analytics Daily Summary</div>")
+            _line(html, "<div class='section-title'>Daily Email Summary</div>")
             for item in day_data["email_analytics"]:
                 summary = str(item.get("daily_summary", "")).strip() or "No daily summary captured."
                 _line(html, f"<pre>{escape(summary)}</pre>")
@@ -553,7 +638,7 @@ def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, mont
                     html,
                     (
                         "<div class='journal-row' data-kind='email-analytics' data-date='"
-                        f"{_escape_attr(day)}' data-ref='Email Analytics Summary' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(summary)}'></div>"
+                        f"{_escape_attr(day)}' data-ref='Daily Email Summary' data-attachment=''><input type='hidden' class='journal-desc' value='{_escape_attr(summary)}'></div>"
                     ),
                 )
                 total_rows += 1
@@ -563,22 +648,33 @@ def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, mont
     _line(html, "</form></div>")
 
     _line(html, "<script>")
-    _line(html, "function _escapePipes(s) { return (s || '').split('\\r').join(' ').split('\\n').join(' ').split('|').join('\\\\|').trim(); }")
+    _line(html, "function _normalizeMultiline(s) { return (s || '').replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').trim(); }")
+    _line(html, "function _escapeMd(s) { return (s || '').replace(/\\|/g, '\\\\|'); }")
+    _line(html, "function _appendMultilineBullet(lines, text, prefix) {")
+    _line(html, "  const body = _normalizeMultiline(text);")
+    _line(html, "  if (!body) { return false; }")
+    _line(html, "  const parts = body.split('\\n');")
+    _line(html, "  const first = _escapeMd(parts[0]);")
+    _line(html, "  lines.push('- ' + (prefix ? prefix + first : first));")
+    _line(html, "  for (let i = 1; i < parts.length; i += 1) { lines.push('  ' + _escapeMd(parts[i])); }")
+    _line(html, "  return true;")
+    _line(html, "}")
     _line(html, "function _downloadTextFile(filename, content) { const blob = new Blob([content], { type: 'text/plain;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }")
     _line(html, "function compileJournal() {")
     _line(html, "  const rows = document.querySelectorAll('.journal-row');")
-    _line(html, "  let out = '# Work Journal\\n';")
+    _line(html, "  const lines = ['# Work Journal'];")
     _line(html, "  let count = 0;")
     _line(html, "  let currentDay = '';")
     _line(html, "  let currentSection = '';")
     _line(html, "  const sectionForKind = (kind, ref) => {")
     _line(html, "    if (kind === 'ticket') return 'Ticket Summary';")
     _line(html, "    if (kind === 'meeting') return 'Meeting Minutes';")
-    _line(html, "    if (kind === 'email-analytics') return 'Email Analytics Daily Summary';")
+    _line(html, "    if (kind === 'email-analytics') return 'Daily Email Summary';")
+    _line(html, "    if (kind === 'daily-notes') return 'Daily Notes';")
     _line(html, "    if (kind === 'screenshot' || kind === 'note') return 'Chronological Activity';")
     _line(html, "    if ((ref || '').startsWith('Screenshot (')) return 'Chronological Activity';")
     _line(html, "    if ((ref || '').startsWith('Meeting:')) return 'Meeting Minutes';")
-    _line(html, "    if ((ref || '').startsWith('Email Analytics Summary')) return 'Email Analytics Daily Summary';")
+    _line(html, "    if ((ref || '').startsWith('Daily Email Summary')) return 'Daily Email Summary';")
     _line(html, "    return 'Activity';")
     _line(html, "  };")
     _line(html, "  for (const row of rows) {")
@@ -586,20 +682,21 @@ def generate_dashboard(days: int = 31, output_file: str = OUTPUT_DASHBOARD, mont
     _line(html, "    const hidden = row.querySelector('.journal-desc');")
     _line(html, "    let s = hidden ? hidden.value : '';")
     _line(html, "    if (a) { s = '!'+a+'! ' + s; }")
-    _line(html, "    s = _escapePipes(s);")
-    _line(html, "    const refCell = u ? '[' + _escapePipes(r) + '](' + u + ')' : _escapePipes(r);")
+    _line(html, "    s = _normalizeMultiline(s);")
     _line(html, "    if (!s) { continue; }")
-    _line(html, "    if (d !== currentDay) { currentDay = d; currentSection = ''; out += '\\n## ' + d + '\\n'; }")
+    _line(html, "    const refCell = u ? '[' + _escapeMd(r) + '](' + u + ')' : _escapeMd(r);")
+    _line(html, "    if (d !== currentDay) { currentDay = d; currentSection = ''; lines.push(''); lines.push('## ' + d); }")
     _line(html, "    const section = sectionForKind(k, r);")
-    _line(html, "    if (section !== currentSection) { currentSection = section; out += '\\n### ' + section + '\\n'; }")
-    _line(html, "    let bullet = s;")
-    _line(html, "    if (k === 'ticket') { bullet = refCell + ': ' + s; }")
-    _line(html, "    else if (k === 'screenshot' || k === 'note') { bullet = (r || 'Activity') + ': ' + s; }")
-    _line(html, "    else if (k === 'meeting' || k === 'email-analytics') { bullet = s; }")
-    _line(html, "    out += '- ' + bullet + '\\n'; count += 1;")
+    _line(html, "    if (section !== currentSection) { currentSection = section; lines.push('### ' + section); }")
+    _line(html, "    let added = false;")
+    _line(html, "    if (k === 'ticket') { added = _appendMultilineBullet(lines, s, refCell + ': '); }")
+    _line(html, "    else if (k === 'screenshot' || k === 'note') { added = _appendMultilineBullet(lines, s, _escapeMd(r || 'Activity') + ': '); }")
+    _line(html, "    else if (k === 'meeting' || k === 'email-analytics' || k === 'daily-notes') { added = _appendMultilineBullet(lines, s, ''); }")
+    _line(html, "    else { added = _appendMultilineBullet(lines, s, ''); }")
+    _line(html, "    if (added) { count += 1; }")
     _line(html, "  }")
     _line(html, "  const fileName = 'confluence_markup_' + new Date().toISOString().slice(0, 10) + '.md';")
-    _line(html, "  _downloadTextFile(fileName, out);")
+    _line(html, "  _downloadTextFile(fileName, lines.join('\\n'));")
     _line(html, "  document.getElementById('genStatus').textContent = count + ' rows generated and downloaded.';")
     _line(html, "}")
     _line(html, "</script>")

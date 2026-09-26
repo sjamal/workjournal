@@ -51,8 +51,13 @@ def _normalize_sn_value(value, default: str = "") -> str:
     return str(value if value is not None else default)
 
 
-def fetch_azure_devops(start_date: str) -> list[dict]:
-    """Fetch work items changed in the lookback window from Azure DevOps."""
+def fetch_azure_devops(
+    start_date: str,
+    end_date: str | None = None,
+    work_item_types: list[str] | None = None,
+    all_project_items: bool = False,
+) -> list[dict]:
+    """Fetch Azure DevOps work items changed within an optional date window."""
     if not all([ADO_ORG, ADO_PROJECT, ADO_PAT]):
         print("[!] Skipping Azure DevOps: missing ADO_ORG/ADO_PROJECT/ADO_PAT in .env")
         return []
@@ -62,13 +67,22 @@ def fetch_azure_devops(start_date: str) -> list[dict]:
     headers = {"Authorization": f"Basic {auth_header}", "Content-Type": "application/json"}
 
     wiql_url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_apis/wit/wiql?api-version=7.1"
+    type_clause = ""
+    if work_item_types:
+        quoted_types = ", ".join(f"'{item.replace(chr(39), chr(39) * 2)}'" for item in work_item_types)
+        type_clause = f"AND [System.WorkItemType] IN ({quoted_types})"
+
+    ownership_clause = "" if all_project_items else "AND ([System.AssignedTo] = @me OR [System.ChangedBy] = @me)"
+    end_clause = f"AND [System.ChangedDate] < '{end_date}'" if end_date else ""
     query_payload = {
         "query": f"""
         SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.ChangedDate]
         FROM WorkItems
         WHERE [System.AreaPath] UNDER '{ADO_PROJECT}'
           AND [System.ChangedDate] >= '{start_date}'
-          AND ([System.AssignedTo] = @me OR [System.ChangedBy] = @me)
+          {end_clause}
+          {type_clause}
+          {ownership_clause}
         ORDER BY [System.ChangedDate] DESC
         """
     }
@@ -84,13 +98,38 @@ def fetch_azure_devops(start_date: str) -> list[dict]:
             print("[-] No recent Azure DevOps items found.")
             return []
 
-        item_ids = [str(item["id"]) for item in refs]
-        details_url = f"https://dev.azure.com/{ADO_ORG}/_apis/wit/workitems?ids={','.join(item_ids)}&api-version=7.1"
-        details_response = requests.get(details_url, headers=headers, timeout=30)
-        details_response.raise_for_status()
+        item_ids = [int(item["id"]) for item in refs]
+        details_url = f"https://dev.azure.com/{ADO_ORG}/_apis/wit/workitemsbatch?api-version=7.1"
+        details_response = requests.post(
+            details_url,
+            json={
+                "ids": item_ids,
+                "fields": [
+                    "System.Id",
+                    "System.Title",
+                    "System.WorkItemType",
+                    "System.State",
+                    "System.ChangedDate",
+                ],
+            },
+            headers=headers,
+            timeout=30,
+        )
+        if details_response.status_code != 200:
+            print(f"[!] ADO batch details request failed ({details_response.status_code}); retrying items individually")
+            details = []
+            for item_id in item_ids:
+                single_url = f"https://dev.azure.com/{ADO_ORG}/_apis/wit/workitems/{item_id}?api-version=7.1"
+                single_response = requests.get(single_url, headers=headers, timeout=30)
+                if single_response.status_code == 200:
+                    details.append(single_response.json())
+                else:
+                    print(f"[!] Skipping ADO work item {item_id} ({single_response.status_code})")
+        else:
+            details = details_response.json().get("value", [])
 
         parsed_items: list[dict] = []
-        for item in details_response.json().get("value", []):
+        for item in details:
             fields = item.get("fields", {})
             parsed_items.append(
                 {
@@ -190,15 +229,42 @@ def fetch_servicenow() -> list[dict]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch ADO and local ServiceNow ticket activity into cache")
     parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
+    parser.add_argument("--month", help="Exact month scope in YYYY-MM; overrides --days")
+    parser.add_argument("--start-date", help="Inclusive ADO changed-date boundary in YYYY-MM-DD")
+    parser.add_argument("--end-date", help="Exclusive ADO changed-date boundary in YYYY-MM-DD")
+    parser.add_argument(
+        "--work-item-types",
+        help="Comma-separated ADO types to include, for example 'User Story,Task'",
+    )
+    parser.add_argument(
+        "--all-project-items",
+        action="store_true",
+        help="Include all matching project items instead of only @me-assigned or @me-changed items",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    start_date = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
+    if args.month:
+        try:
+            month_start = datetime.strptime(args.month, "%Y-%m-01")
+        except ValueError as exc:
+            raise SystemExit("--month must use YYYY-MM") from exc
+        if month_start.month == 12:
+            month_end = datetime(month_start.year + 1, 1, 1)
+        else:
+            month_end = datetime(month_start.year, month_start.month + 1, 1)
+        start_date = month_start.strftime("%Y-%m-%d")
+        end_date = month_end.strftime("%Y-%m-%d")
+    else:
+        start_date = args.start_date or (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
+        end_date = args.end_date
+
+    work_item_types = [item.strip() for item in (args.work_item_types or "").split(",") if item.strip()]
 
     all_tickets: list[dict] = []
-    all_tickets.extend(fetch_azure_devops(start_date))
+    all_tickets.extend(fetch_azure_devops(start_date, end_date, work_item_types, args.all_project_items))
     all_tickets.extend(fetch_servicenow())
 
     save_to_cache(all_tickets)
