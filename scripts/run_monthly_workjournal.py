@@ -61,7 +61,7 @@ def main() -> int:
 
     try:
         _run([py, "scripts/import_email_analytics_reports.py"])
-        _run([py, "scripts/fetch_tickets.py", "--days", str(days)])
+        _run([py, "scripts/fetch_tickets.py", "--month", args.month])
         _run([py, "scripts/summarize_transcripts.py"])
 
         if args.summarize_screenshots:

@@ -25,6 +25,7 @@ cache/
 # Local data that may contain sensitive information
 incidents/*.json
 transcripts/*.txt
+transcripts/*.vtt
 
 # Temporary files
 *.log

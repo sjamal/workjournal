@@ -24,8 +24,19 @@ OUTPUT_TEXT_FILE = os.path.join(BASE_DIR, "compilation", "confluence_markup.txt"
 
 
 def _escape_markup_cell(value: str) -> str:
-    compact = str(value).replace("\r", " ").replace("\n", " ").strip()
-    return compact.replace("|", "\\|")
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return "\n".join(line.replace("|", "\\|") for line in text.split("\n"))
+
+
+def _append_multiline_bullet(markup: list[str], text: str, prefix: str = "") -> bool:
+    body = _escape_markup_cell(text)
+    if not body:
+        return False
+    lines = body.split("\n")
+    markup.append(f"- {prefix}{lines[0]}")
+    for line in lines[1:]:
+        markup.append(f"  {line}")
+    return True
 
 
 def _section_for_row(row: dict[str, str]) -> str:
@@ -36,15 +47,17 @@ def _section_for_row(row: dict[str, str]) -> str:
     if kind == "meeting":
         return "Meeting Minutes"
     if kind == "email-analytics":
-        return "Email Analytics Daily Summary"
+        return "Daily Email Summary"
+    if kind == "daily-notes":
+        return "Daily Notes"
     if kind in {"screenshot", "note"}:
         return "Chronological Activity"
     if ref.startswith("Screenshot ("):
         return "Chronological Activity"
     if ref.startswith("Meeting:"):
         return "Meeting Minutes"
-    if ref == "Email Analytics Summary":
-        return "Email Analytics Daily Summary"
+    if ref == "Daily Email Summary":
+        return "Daily Email Summary"
     return "Activity"
 
 
@@ -57,13 +70,13 @@ def generate_markup(days: int = 31, month: str | None = None) -> str:
     current_day = ""
     current_section = ""
     for row in rows:
-        date = _escape_markup_cell(row.get("date", ""))
-        ref = _escape_markup_cell(row.get("ref", ""))
+        date = str(row.get("date", "")).strip()
+        ref = str(row.get("ref", "")).strip()
         url = str(row.get("url", "")).strip()
         if url:
             ref = f"[{ref}]({url})"
         summary = _escape_markup_cell(row.get("summary", ""))
-        attachment = _escape_markup_cell(row.get("attachment", ""))
+        attachment = str(row.get("attachment", "")).strip()
         if attachment:
             summary = f"!{attachment}! {summary}".strip()
         if not summary:
@@ -81,11 +94,13 @@ def generate_markup(days: int = 31, month: str | None = None) -> str:
 
         kind = str(row.get("kind", "")).strip()
         if kind == "ticket":
-            markup.append(f"- {ref}: {summary}")
+            _append_multiline_bullet(markup, summary, f"{ref}: ")
         elif kind in {"screenshot", "note"}:
-            markup.append(f"- {ref}: {summary}")
+            _append_multiline_bullet(markup, summary, f"{ref}: ")
+        elif kind in {"meeting", "email-analytics", "daily-notes"}:
+            _append_multiline_bullet(markup, summary)
         else:
-            markup.append(f"- {summary}")
+            _append_multiline_bullet(markup, summary)
 
     return "\n".join(markup)
 
