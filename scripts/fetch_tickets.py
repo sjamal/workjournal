@@ -206,15 +206,18 @@ def fetch_servicenow() -> list[dict]:
         )
         state = _normalize_sn_value(record.get("state", record.get("status", "Unknown")), "Unknown")
 
+        is_change = ticket_id.upper().startswith("CHG")
+        table = "change_request" if is_change else "incident"
+
         url = ""
         if SN_INSTANCE and sys_id:
-            url = f"https://{SN_INSTANCE}.service-now.com/{sys_id.lstrip('/')}"
+            url = f"https://{SN_INSTANCE}.service-now.com/nav_to.do?uri={table}.do?sys_id={sys_id.lstrip('/')}"
 
         parsed_tickets.append(
             {
-                "source": "ServiceNow (INC)",
+                "source": "ServiceNow (CHG)" if is_change else "ServiceNow (INC)",
                 "id": ticket_id,
-                "type": "Incident",
+                "type": "Change Request" if is_change else "Incident",
                 "title": short_desc,
                 "state": state,
                 "date_modified": updated,
@@ -248,7 +251,7 @@ def main() -> None:
     args = parse_args()
     if args.month:
         try:
-            month_start = datetime.strptime(args.month, "%Y-%m-01")
+            month_start = datetime.strptime(args.month, "%Y-%m")
         except ValueError as exc:
             raise SystemExit("--month must use YYYY-MM") from exc
         if month_start.month == 12:

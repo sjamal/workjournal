@@ -57,8 +57,12 @@ Use `31` for monthly runs to avoid missing a long month.
 For exact monthly boundaries, prefer `--month YYYY-MM`.
 
 ```bash
+# ServiceNow: build the monthly link page, download each JSON into incidents/, then merge
+./venv/bin/python scripts/servicenow_export_links.py --month 2026-07
+./venv/bin/python scripts/merge_servicenow_exports.py --month 2026-07
+
 ./venv/bin/python scripts/import_email_analytics_reports.py
-./venv/bin/python scripts/fetch_tickets.py --days 31
+./venv/bin/python scripts/fetch_tickets.py --month 2026-07
 ./venv/bin/python scripts/summarize_transcripts.py
 
 # Optional: AI summary for screenshots (local Ollama vision)
@@ -73,6 +77,16 @@ For exact monthly boundaries, prefer `--month YYYY-MM`.
 # One-command orchestration (recommended)
 ./venv/bin/python scripts/run_monthly_workjournal.py --month 2026-07 --summarize-screenshots
 ```
+
+### ServiceNow Export
+
+ServiceNow is read from local JSON exports, not the API.
+
+1. `servicenow_export_links.py` writes `compilation/servicenow_export_YYYY-MM.html` with one-click JSONv2 download links (incidents, change requests, your journal entries, and mentions for the month).
+2. Open it in a browser signed in to ServiceNow and save each download into `incidents/` with the filename shown.
+3. `merge_servicenow_exports.py` writes `incidents/incident.json`, keeping tickets with activity in the month and dating each by its latest in-month activity so it lands on the right dashboard day.
+
+The orchestrator runs steps 1 and 3 automatically.
 
 ## Primary Outputs
 
@@ -90,6 +104,7 @@ For exact monthly boundaries, prefer `--month YYYY-MM`.
 - screenshots: `~/Downloads`
 - transcript files: `transcripts/*.txt`
 - incident exports: `incidents/*.json`
+- monthly ServiceNow downloads: `incidents/sn_{incidents,changes,journal,mentions}_YYYY-MM.json`
 - email-analytics daily files: `../email-analytics/output/daily_YYYY-MM-DD.md`
 
 ## Dashboard Behavior
@@ -168,7 +183,7 @@ If you want Confluence page creation automated, use:
 
 Required environment variables:
 
-- `CONFLUENCE_URL`
+- `CONFLUENCE_URL` (for example `https://<your-site>.atlassian.net/wiki`)
 - `CONFLUENCE_EMAIL`
 - `CONFLUENCE_API_TOKEN` or `CONFLUENCE_TOKEN`
 - `CONFLUENCE_SPACE`
@@ -178,6 +193,8 @@ This path creates the page via REST API and uploads `compilation/assets/` as att
 If `CONFLUENCE_PARENT_PAGE_ID` is set, the new page is created as a child of that page.
 
 To nest the monthly journal under an existing page, pass that page's id with `--parent-page-id` and the script will create the new page beneath it.
+
+If a placeholder page for the month already exists (for example an empty page with the same title), update it with `--page-id <id>` instead; creating a page with a duplicate title fails. Use `--dry-run` first to check the target.
 
 Recommended reference model:
 

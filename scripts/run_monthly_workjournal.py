@@ -60,7 +60,9 @@ def main() -> int:
         return 1
 
     try:
+        _run([py, "scripts/servicenow_export_links.py", "--month", args.month])
         _run([py, "scripts/import_email_analytics_reports.py"])
+        _run([py, "scripts/merge_servicenow_exports.py", "--month", args.month])
         _run([py, "scripts/fetch_tickets.py", "--month", args.month])
         _run([py, "scripts/summarize_transcripts.py"])
 
