@@ -279,7 +279,7 @@ def _build_storage_html(rows: list[dict[str, str]]) -> str:
 
 
 def _normalize_base_url(value: str) -> str:
-    return re.sub(r"/spaces/.*$", "", value.strip().rstrip("/"))
+    return re.sub(r"/spaces(/.*)?$", "", value.strip().rstrip("/"))
 
 
 def _referenced_asset_names(rows: list[dict[str, str]]) -> set[str]:
