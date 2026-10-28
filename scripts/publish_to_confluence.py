@@ -52,11 +52,22 @@ def _code_signal(line: str) -> int:
         return 2
     if re.match(r"^(?:\$|%|>>>|PS [^>]+>|[A-Za-z0-9_.-]+@[^ ]+[#$%>]\s*)", stripped, re.IGNORECASE):
         return 3
+    # Cloud Shell ("user [ ~ ]$ ") and interactive tool prompts ("spacecmd {SSM:0}> ").
+    if re.match(r"^[\w.-]+ \[[^\]]*\]\s*[$#]\s|^[\w.-]+ \{[^}]*\}>\s", stripped):
+        return 3
+    # PowerShell Verb-Noun cmdlets, optionally assigned to a variable.
+    if re.match(r"^(?:\$\w+\s*=\s*)?(?:Get|Set|New|Remove|Update|Install|Uninstall|Connect|Disconnect|Start|Stop|Restart|Invoke|Import|Export|Add|Test|Select|Write|Enable|Disable)-[A-Z]\w+\b", stripped):
+        return 3
+    # Terraform plan resource headers.
+    if re.match(r"^[+~-]\s+(?:resource|data|module)\s+\"", stripped):
+        return 3
+    if re.match(r"^(?:VERBOSE|WARNING|FAILED)\b|^(?:Error|Warning|usage):\s", stripped):
+        return 3
     if re.match(r"^[A-Za-z0-9_.-]+@[^ ]+\s+#\s+", stripped):
         return 3
     if re.match(r"^[A-Za-z0-9_.-]+:[~\/A-Za-z0-9_.-]*\s+#\s+", stripped):
         return 3
-    if re.match(r"^(?:sudo|cd|ls|find|grep|awk|sed|cat|curl|git|python(?:3)?|pip|npm|make|docker|kubectl|az|gh|sha256sum|openssl|ssh|chmod|chown|systemctl|journalctl|terraform|ansible|rm|cp|mv|mkdir|rmdir|touch|tee|vim|nano|less|more|head|tail|sort|uniq|wc|diff|tar|zip|unzip|rpm|dpkg|apt|dnf|mgradm|mgrctl|reboot|mount|umount|tree|df|du|free|ip|ss|nsradmin|transactional-update|puppet|puppetserver|lvcreate|lvextend|lvdisplay|vgcreate|vgextend|pvcreate|resize2fs|xfs_growfs|parted)\b", stripped, re.IGNORECASE):
+    if re.match(r"^(?:sudo|cd|ls|find|grep|awk|sed|cat|curl|git|python(?:3)?|pip|npm|make|docker|kubectl|az|gh|sha256sum|openssl|ssh|chmod|chown|systemctl|journalctl|terraform|ansible|rm|cp|mv|mkdir|rmdir|touch|tee|vim|nano|less|more|head|tail|sort|uniq|wc|diff|tar|zip|unzip|rpm|dpkg|apt|dnf|mgradm|mgrctl|reboot|mount|umount|tree|df|du|free|ip|ss|nsradmin|transactional-update|puppet|puppetserver|lvcreate|lvextend|lvdisplay|vgcreate|vgextend|pvcreate|resize2fs|xfs_growfs|parted|echo|podman|spacecmd|salt|salt-call|mgr-bootstrap|dracut|ln|btrfs|chroot|lsblk|grub2-mkconfig|zypper|checkov)\s", stripped, re.IGNORECASE):
         return 3
     if re.match(r"^\s*\d+\s+(?:\d{4}-\d{2}-\d{2}\s+)?\d{1,2}:\d{2}:\d{2}\s+(?:sudo|cd|ls|find|grep|awk|sed|cat|curl|git|python|pip|ssh|chmod|chown|systemctl|docker|kubectl|az|gh|zypper|puppet|mgrctl|mgradm)\b", stripped, re.IGNORECASE):
         return 3
@@ -64,13 +75,35 @@ def _code_signal(line: str) -> int:
         return 2
     if re.match(r"^[A-Za-z0-9][A-Za-z0-9.-]*\s+\([^()]+\)$", stripped):
         return 2
-    if re.match(r"^(?:total\s+\d+|[dlcbps-][rwx-]{8,}\s+\d+\s+\S+\s+\S+|\S+\s+\S+\s+\S+\s+(?:mounted|online|active))", stripped, re.IGNORECASE):
+    if re.match(r"^(?:total\s+\d+|[dlcbps-][rwx-]{8,}[.+@]?\s+\d+\s+\S+\s+\S+|\S+\s+\S+\s+\S+\s+(?:mounted|online|active))", stripped, re.IGNORECASE):
         return 2
     if re.match(r"^(?:zypper|puppet|df|lsblk|mount|fdisk|lv|vg|pv|resize2fs|xfs_growfs|parted|nslookup|dig|host|hostname)\b", stripped, re.IGNORECASE):
         return 3
     if re.match(r"^(?:#!/|export\s+|set\s+-[eux]|function\s+|(?:INFO|WARN|ERROR|DEBUG|TRACE)\b|\[[+!X✓-]\]|(?:HTTP|GET|POST|PUT|DELETE)\s+\d{3}\b|Traceback|File \".*\", line )", stripped, re.IGNORECASE):
         return 3
     if re.match(r"^#\s+(?:verify|run|check|set|create|install|remove|list|query|copy|configure|start|stop|restart|test|build)\b", stripped, re.IGNORECASE):
+        return 2
+    # Shell/HCL comments, including "#note" with no space (but not Markdown "## headings").
+    if re.match(r"^#(?!#)\s*\S", stripped):
+        return 2
+    # Bare flags and absolute paths on their own line, then continuation lines.
+    if re.match(r"^--?[a-z][\w-]*$|^/(?!subscriptions/)[\w.@+-]+(?:/[\w.@+:-]*){2,}$", stripped):
+        return 3
+    if re.match(r"^>\s+\S", stripped):
+        return 2
+    # Assignments with spaces (HCL/Terraform plans: "+ key = value", "key = value").
+    if re.match(r"^(?:[+~-]\s+)?[A-Za-z_][\w.\"\[\]-]*\s+=\s+\S", stripped):
+        return 2
+    # Package-manager and installer progress output quoting a name.
+    if re.match(r"^(?:Executing|Refreshing|Retrieving|Loading|Installing|Removing|Creating|Downloading|Copying|copy)\b.*['\"]", stripped) or re.match(r"^Creating bootstrap repo\b", stripped):
+        return 3
+    # Indented identifier lists (query column lists, YAML-like keys).
+    if line[:1].isspace() and re.match(r"^[A-Za-z_][\w.]*,?$", stripped):
+        return 1
+    # Query pipes (KQL), lone brackets, and IP/subnet tables.
+    if re.match(r"^\|\s*\w+|^[\[\]{}()]+[,;]?$", stripped):
+        return 2
+    if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b", stripped) and re.search(r"\t|\s{3,}", line):
         return 2
     if re.match(r"^(?:[A-Za-z_][\w.-]*=|[A-Za-z_][\w.-]*:\s+\S|\{\s*[\"']|[\[{].*[\]}]$)", stripped):
         return 2
@@ -102,7 +135,7 @@ def _code_language(lines: list[str]) -> str:
     if any(token in text for token in ("#!/bin/", "sudo ", "git ", "grep ", "export ", "set -e")):
         return "bash"
     if any(token in text for token in ("import ", "def ", "from ", "print(")):
-        return "python"
+        return "py"
     if text.lstrip().startswith(("{", "[")):
         return "json"
     return "none"

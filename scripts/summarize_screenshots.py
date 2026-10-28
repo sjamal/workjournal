@@ -8,6 +8,7 @@ Purpose:
 
 How to run:
 - ./venv/bin/python scripts/summarize_screenshots.py --days 31
+- ./venv/bin/python scripts/summarize_screenshots.py --month 2026-09
 - ./venv/bin/python scripts/summarize_screenshots.py --days 31 --force
 """
 
@@ -110,6 +111,7 @@ def summarize_image(path: str, day_notes: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=31, help="Lookback window in days (default: 31)")
+    parser.add_argument("--month", help="Exact month scope in YYYY-MM; overrides --days")
     parser.add_argument("--downloads", default=DOWNLOADS_DIR)
     parser.add_argument("--output", default=CACHE_FILE)
     parser.add_argument("--force", action="store_true", help="Recompute summaries even if cache has matching key")
@@ -127,14 +129,23 @@ def main() -> None:
 
     existing_map = {f"{x.get('path','')}|{x.get('mtime',0)}": x for x in existing}
 
-    cutoff = datetime.now().timestamp() - (args.days * 86400)
+    if args.month:
+        try:
+            month_start = datetime.strptime(args.month, "%Y-%m")
+        except ValueError as exc:
+            raise SystemExit("--month must use YYYY-MM") from exc
+        month_end = datetime(month_start.year + month_start.month // 12, month_start.month % 12 + 1, 1)
+        cutoff, window_end = month_start.timestamp(), month_end.timestamp()
+    else:
+        cutoff, window_end = datetime.now().timestamp() - (args.days * 86400), float("inf")
     day_notes = parse_notes_by_day()
 
-    records = []
+    # Keep cached summaries outside this run's window so other months are not lost.
+    records = [x for x in existing if not (cutoff <= x.get("mtime", 0) < window_end)]
     for ext in ("*.png", "*.jpg", "*.jpeg"):
         for path in glob.glob(os.path.join(os.path.expanduser(args.downloads), ext)):
             mtime = os.path.getmtime(path)
-            if mtime < cutoff:
+            if mtime < cutoff or mtime >= window_end:
                 continue
 
             day = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
