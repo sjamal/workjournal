@@ -67,7 +67,7 @@ def main() -> int:
         _run([py, "scripts/summarize_transcripts.py"])
 
         if args.summarize_screenshots:
-            cmd = [py, "scripts/summarize_screenshots.py", "--days", str(days)]
+            cmd = [py, "scripts/summarize_screenshots.py", "--month", args.month]
             if args.force_screenshot_summaries:
                 cmd.append("--force")
             _run(cmd)
