@@ -38,21 +38,28 @@ def parse_filename_metadata(filename):
     date_match = re.search(
         r'(\d{4}-\d{2}-\d{2})|(\d{8})|(\d{2}-\d{2}-\d{4})|'
         r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?[ ,]+\d{4})|'
-        r'((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?[ ,]+\d{4})',
+        r'((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?[ ,]+\d{4})|'
+        r'(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[ ,]+\d{4})',
         base_name,
         flags=re.IGNORECASE,
     )
-    
-    extracted_date = datetime.now().strftime("%Y-%m-%d") # Default backup date
+
+    # Default backup date: when the file was saved, if it exists, else today
+    path = filename if os.path.isabs(filename) else os.path.join(TRANSCRIPTS_DIR, filename)
+    fallback = datetime.fromtimestamp(os.path.getmtime(path)) if os.path.exists(path) else datetime.now()
+    extracted_date = fallback.strftime("%Y-%m-%d")
     clean_title = base_name
 
     if date_match:
         raw_date = date_match.group(0)
         try:
-            if date_match.group(4) or date_match.group(5):
-                raw_date = date_match.group(4) or date_match.group(5)
+            if date_match.group(4) or date_match.group(5) or date_match.group(6):
+                raw_date = date_match.group(4) or date_match.group(5) or date_match.group(6)
                 normalized = re.sub(r'(\d)(st|nd|rd|th)\b', r'\1', raw_date, flags=re.IGNORECASE)
                 normalized = re.sub(r'\s+', ' ', normalized.replace(',', ' ')).strip()
+                if normalized.split()[0].isdigit():
+                    day, month, year = normalized.split()
+                    normalized = f"{month} {day} {year}"
                 month_format = "%B %d %Y" if len(normalized.split()[0]) > 3 else "%b %d %Y"
                 parsed_dt = datetime.strptime(normalized, month_format)
             elif "-" in raw_date:
@@ -74,7 +81,7 @@ def parse_filename_metadata(filename):
         extracted_date = "2026-08-11"
     
     # Convert underscores/hyphens to spaces and apply Title Case
-    clean_title = re.sub(r'[_|-]+', ' ', clean_title).strip().title()
+    clean_title = re.sub(r'[_|\s-]+', ' ', clean_title).strip().title()
     return clean_title, extracted_date
 
 def save_and_archive_cache(new_data):
