@@ -196,6 +196,19 @@ To nest the monthly journal under an existing page, pass that page's id with `--
 
 If a placeholder page for the month already exists (for example an empty page with the same title), update it with `--page-id <id>` instead; creating a page with a duplicate title fails. Use `--dry-run` first to check the target.
 
+### Updating Meeting Summaries On A Published Page
+
+Once a month's page has been hand-edited, don't republish the whole page. Re-summarize the transcript, then splice just that meeting's section into the existing page:
+
+```bash
+./venv/bin/python scripts/summarize_transcripts.py --file "<transcript file name>"
+./venv/bin/python scripts/splice_meeting_summaries.py --month 2026-10 --page-id <id> --file "<transcript file name>" --dry-run
+```
+
+Drop `--dry-run` to publish. A section with the same heading is replaced; otherwise the meeting is inserted on its day, before the Daily Email Summary. The script refuses to publish over a draft with newer unpublished edits, or a page that changed while it ran, and checks that screenshot counts are unchanged afterwards.
+
+Long transcripts are summarized in chunks so the whole meeting is covered. Put the meeting date in the transcript file name (for example `- October 29, 2026`), because downloaded Teams `.vtt` files carry no date of their own.
+
 Recommended reference model:
 
 1. Use the page id as the stable reference for the parent page.
