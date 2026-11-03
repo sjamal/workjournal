@@ -26,6 +26,10 @@ CACHE_DIR = os.path.join(BASE_DIR, "cache")
 MEETING_CACHE_FILE = os.path.join(CACHE_DIR, "meeting_summaries_cache.json")
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "llama3"
+# llama3's full context; Ollama's default is smaller and silently truncates prompts.
+NUM_CTX = 8192
+# Roughly 2,500 tokens per chunk, leaving room for the prompt and the response.
+CHUNK_CHARS = 9000
 
 def parse_filename_metadata(filename):
     """
@@ -80,8 +84,9 @@ def parse_filename_metadata(filename):
     if "AIK with MS Co-Pilot workshop" in base_name:
         extracted_date = "2026-08-11"
     
-    # Convert underscores/hyphens to spaces and apply Title Case
-    clean_title = re.sub(r'[_|\s-]+', ' ', clean_title).strip().title()
+    # Convert underscores/hyphens to spaces and apply Title Case, keeping acronyms like IFT and (MCU)
+    clean_title = re.sub(r'[_|\s-]+', ' ', clean_title).strip()
+    clean_title = " ".join(w if any(c.isupper() for c in w) else w.capitalize() for w in clean_title.split())
     return clean_title, extracted_date
 
 def save_and_archive_cache(new_data):
@@ -138,13 +143,61 @@ def read_transcript_file(filepath):
 
     return text
 
-def summarize_kt_with_ollama(text, meeting_title):
-    prompt = f"You are a Staff Technical Writer compiling an engineering Knowledge Base. Analyze the following Knowledge Transfer (KT) session transcript for '{meeting_title}'. Format your response using clear markdown subsections for Core Architecture, Institutional FAQs, and Next Steps/Commands.\n\nTRANSCRIPT:\n{text[:9000]}"
-    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False}
+def split_into_chunks(text, max_chars=CHUNK_CHARS):
+    """Split text on line boundaries into pieces of at most max_chars."""
+    chunks, current, size = [], [], 0
+    for line in text.splitlines():
+        if current and size + len(line) + 1 > max_chars:
+            chunks.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+def ask_ollama(prompt):
+    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False, "options": {"num_ctx": NUM_CTX}}
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload, timeout=120)
+        response = requests.post(OLLAMA_API_URL, json=payload, timeout=300)
         return response.json().get("response", "").strip() if response.status_code == 200 else "Ollama error"
     except Exception as e: return f"Error: {e}"
+
+def kb_prompt(meeting_title, source_label, content, extra=""):
+    return f"You are a Staff Technical Writer compiling an engineering Knowledge Base. Analyze the following Knowledge Transfer (KT) session {source_label} for '{meeting_title}'. Format your response using clear markdown subsections for Core Architecture, Institutional FAQs, and Next Steps/Commands.{extra}\n\n{source_label.upper()}:\n{content}"
+
+def summarize_kt_with_ollama(text, meeting_title, prior_summary=None):
+    """
+    Short transcripts are summarized in one pass. Long ones are split into
+    chunks, each chunk is condensed into notes, and the notes are combined,
+    so the whole meeting is covered instead of only its opening minutes.
+    prior_summary is an earlier summary of the same meeting whose topics must be kept.
+    """
+    keep = ""
+    if prior_summary:
+        keep = f" An earlier summary of this same meeting is included below; keep every topic, decision, system and action item it mentions.\n\nEARLIER SUMMARY:\n{prior_summary}"
+
+    if len(text) <= CHUNK_CHARS:
+        return ask_ollama(kb_prompt(meeting_title, "transcript", text, keep))
+
+    notes = text
+    while len(notes) > CHUNK_CHARS * 2:
+        chunks = split_into_chunks(notes)
+        parts = []
+        for i, chunk in enumerate(chunks, 1):
+            print(f"    - condensing part {i}/{len(chunks)}")
+            parts.append(ask_ollama(
+                f"Part {i} of {len(chunks)} of the transcript for '{meeting_title}'. "
+                "Write detailed bullet-point notes covering every topic discussed, systems and components, "
+                "decisions, open questions, action items and owners, and dates or deadlines. "
+                "Leave out passwords, keys and other secrets. Do not add an introduction.\n\n"
+                f"TRANSCRIPT PART:\n{chunk}"
+            ))
+        condensed = "\n\n".join(parts)
+        if len(condensed) >= len(notes):
+            break  # notes stopped shrinking; combine what we have
+        notes = condensed
+    return ask_ollama(kb_prompt(meeting_title, "meeting notes", notes, keep))
 
 def process_all_transcripts(selected_files=None):
     if selected_files:
