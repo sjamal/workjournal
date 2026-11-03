@@ -15,6 +15,7 @@ import requests
 from dotenv import load_dotenv
 
 from compile_dashboard import build_confluence_rows, build_timeline
+from monthly_stats import with_stats
 
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -373,7 +374,7 @@ def main() -> int:
     args.base_url = _normalize_base_url(args.base_url)
     timeline = build_timeline(31, month=args.month)
     rows = build_confluence_rows(timeline)
-    storage_html = _build_storage_html(rows)
+    storage_html = with_stats(_build_storage_html(rows), args.month)
     asset_paths = [ASSETS_DIR / name for name in sorted(_referenced_asset_names(rows))]
     missing_assets = [path.name for path in asset_paths if not path.is_file()]
     if missing_assets:

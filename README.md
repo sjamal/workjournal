@@ -207,6 +207,8 @@ Once a month's page has been hand-edited, don't republish the whole page. Re-sum
 
 Drop `--dry-run` to publish. A section with the same heading is replaced; otherwise the meeting is inserted on its day, before the Daily Email Summary. The script refuses to publish over a draft with newer unpublished edits, or a page that changed while it ran, and checks that screenshot counts are unchanged afterwards.
 
+Each page starts with a **Monthly Statistics** section (tickets by source and theme, meetings, note days, screenshots, and email digest totals such as action items, PRs and recurring alerts). Full publishes include it; add or refresh it on an existing page with `--stats` (with or without `--file`). Ticket themes are keyword rules in `THEMES` in `scripts/monthly_stats.py`.
+
 Long transcripts are summarized in chunks so the whole meeting is covered. Put the meeting date in the transcript file name (for example `- October 29, 2026`), because downloaded Teams `.vtt` files carry no date of their own.
 
 Recommended reference model:

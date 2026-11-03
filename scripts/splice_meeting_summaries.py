@@ -10,7 +10,8 @@ Purpose:
 
 How to run:
 - ./venv/bin/python scripts/splice_meeting_summaries.py --month 2026-10 --page-id <id> \
-      --file "<transcript file name>" [--file ...] [--dry-run]
+      [--file "<transcript file name>" ...] [--stats] [--dry-run]
+- --stats adds or refreshes the Monthly Statistics section at the top of the page.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import requests
 from dotenv import load_dotenv
 
 from compile_dashboard import build_confluence_rows, build_timeline
+from monthly_stats import with_stats
 from publish_to_confluence import _meeting_time, _meeting_title, _normalize_base_url, _render_meeting_summary
 
 load_dotenv()
@@ -93,7 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Splice meeting summaries into an existing monthly page")
     parser.add_argument("--month", required=True, help="Month of the page in YYYY-MM")
     parser.add_argument("--page-id", required=True, help="Existing Confluence page to update")
-    parser.add_argument("--file", dest="files", action="append", required=True, help="Transcript file name to splice; repeat for multiple")
+    parser.add_argument("--file", dest="files", action="append", default=[], help="Transcript file name to splice; repeat for multiple")
+    parser.add_argument("--stats", action="store_true", help="Add or refresh the Monthly Statistics section")
     parser.add_argument("--base-url", default=os.getenv("CONFLUENCE_URL", ""), help="Confluence site URL")
     parser.add_argument("--email", default=os.getenv("CONFLUENCE_EMAIL", ""), help="Confluence account email")
     parser.add_argument("--api-token", default=os.getenv("CONFLUENCE_API_TOKEN", os.getenv("CONFLUENCE_TOKEN", "")), help="Confluence API token")
@@ -104,6 +107,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.files and not args.stats:
+        print("[X] Pass --file and/or --stats")
+        return 1
     if not args.base_url or not args.email or not args.api_token:
         print("[X] Missing Confluence credentials")
         return 1
@@ -135,6 +141,10 @@ def main() -> int:
             return 1
         updated, action = _splice(updated, date, heading, block)
         print(f"[+] {heading}: {action}")
+    if args.stats:
+        refreshed = "refresh" if "Monthly Statistics</h2>" in updated else "insert"
+        updated = with_stats(updated, args.month)
+        print(f"[+] Monthly Statistics: {refreshed}")
     if args.dry_run:
         return 0
 
